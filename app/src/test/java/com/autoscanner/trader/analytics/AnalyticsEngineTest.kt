@@ -154,6 +154,54 @@ class AnalyticsEngineTest {
     }
 
     @Test
+    fun chartDataProducesUpDirectionWithoutRecognizedTradingInterface() {
+        val candles = (0 until 6).map { index ->
+            val top = 40 - index * 2
+            Candle(index + 1, index * 5, top, index * 5 + 3, top + 8,
+                top, top + 8, "ЗЕЛЁНАЯ", top)
+        }
+        val frames = (1..6).map {
+            frame(candles, instrument = "НЕ ОПРЕДЕЛЕНО", price = "НЕ ОПРЕДЕЛЕНО")
+                .copy(tradingScreenDetected = false)
+        }
+
+        val result = MarketAnalysisEngine().runBlockingAnalyze(
+            frames,
+            "НЕ ОПРЕДЕЛЕНО",
+            "НЕ ОПРЕДЕЛЕНО",
+            "M1",
+        )
+
+        assertEquals(PredictionDirection.BUY, result.direction)
+        assertTrue(result.confidence > 0.0)
+        assertTrue(result.confidence <= 1.0)
+        assertNotNull(result.expiration.seconds)
+    }
+
+    @Test
+    fun chartDataProducesDownDirectionWithoutRecognizedTradingInterface() {
+        val candles = (0 until 6).map { index ->
+            val top = 30 + index * 2
+            Candle(index + 1, index * 5, top, index * 5 + 3, top + 8,
+                top, top + 8, "КРАСНАЯ", top + 8)
+        }
+        val frames = (1..6).map {
+            frame(candles, instrument = "НЕ ОПРЕДЕЛЕНО", price = "НЕ ОПРЕДЕЛЕНО")
+                .copy(tradingScreenDetected = false)
+        }
+
+        val result = MarketAnalysisEngine().runBlockingAnalyze(
+            frames,
+            "НЕ ОПРЕДЕЛЕНО",
+            "НЕ ОПРЕДЕЛЕНО",
+            "M1",
+        )
+
+        assertEquals(PredictionDirection.SELL, result.direction)
+        assertTrue(result.confidence in 0.0..1.0)
+    }
+
+    @Test
     fun expirationIsCappedAtThreeMinutes() {
         val result = ExpirationSelector().select(
             PredictionDirection.BUY, "H1",
@@ -185,6 +233,24 @@ class AnalyticsEngineTest {
             10, false, 0.9, emptyList(),
         )
         assertTrue((shortResult.seconds ?: 0) < (longResult.seconds ?: 0))
+    }
+
+    @Test
+    fun conflictingAnalysisKeepsMinimumExpirationDespiteStrongTrend() {
+        val result = ExpirationSelector().select(
+            PredictionDirection.BUY,
+            "M1",
+            TrendResult(TrendDirection.UP, 0.9, 0.9, 10, "рост"),
+            MomentumResult(DirectionInfluence.UP, 0.3, 0.7, null, null, false, 5),
+            VolatilityResult(VolatilityLevel.MODERATE, 0.8, 1.0),
+            SupportResistanceResult(emptyList(), emptyList(), emptyList(), emptyList()),
+            10,
+            true,
+            0.4,
+            emptyList(),
+        )
+
+        assertEquals(15, result.seconds)
     }
 
     @Test

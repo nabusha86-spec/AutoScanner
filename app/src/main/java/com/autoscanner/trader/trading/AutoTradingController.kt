@@ -42,6 +42,8 @@ class AutoTradingController(
     private var nextCycleJob: Job? = null
     private var analysisJob: Job? = null
     private var captureTimeoutJob: Job? = null
+    private var executionTimeoutJob: Job? = null
+    private var executingCommandId: String? = null
     private var captureInProgress = false
     private var projectionAvailable = false
     private var projectionSessionStarted = false
@@ -100,7 +102,9 @@ class AutoTradingController(
             return
         }
         if (mode == TradingMode.AUTO &&
-            (state.emergencyLocked || state.tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED)
+            (state.emergencyLocked ||
+                state.tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED ||
+                state.tradeCycleState == TradeCycleState.OBSERVING)
         ) {
             updateState(state.copy(
                 mode = TradingMode.MANUAL,
@@ -206,6 +210,7 @@ class AutoTradingController(
         captureTimeoutJob = null
         analysisJob?.cancel()
         analysisJob = null
+        cancelPendingExecution()
         cycleCoordinator.stop()
         if (projectionSessionStarted) stopCaptureAction?.invoke()
         captureInProgress = false
@@ -237,6 +242,7 @@ class AutoTradingController(
         captureTimeoutJob = null
         analysisJob?.cancel()
         analysisJob = null
+        cancelPendingExecution()
         cycleCoordinator.stop()
         if (projectionSessionStarted) stopCaptureAction?.invoke()
         captureInProgress = false
@@ -259,7 +265,9 @@ class AutoTradingController(
     fun confirmEmergencyResume(resetAmount: Boolean, confirmedByUser: Boolean): Boolean {
         if (!confirmedByUser) return false
         if (!state.emergencyLocked) return false
-        if (state.tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED) {
+        if (state.tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED ||
+            state.tradeCycleState == TradeCycleState.OBSERVING
+        ) {
             updateState(state.copy(
                 lastSkipReason = "Возобновление запрещено: результат сделки или сохранённое состояние не подтверждены",
             ))
@@ -373,6 +381,7 @@ class AutoTradingController(
         captureTimeoutJob = null
         analysisJob?.cancel()
         analysisJob = null
+        cancelPendingExecution()
         cycleCoordinator.stop()
         if (projectionSessionStarted) stopCaptureAction?.invoke()
         captureInProgress = false
@@ -493,7 +502,12 @@ class AutoTradingController(
                 scheduleNextCycle()
                 return@launch
             }
-            val entryDecision = determineEntryDecision()
+            if (prediction.confidence < MIN_EXECUTION_CONFIDENCE) {
+                recordSkip("Оценка качества аналитического решения ниже порога исполнения")
+                scheduleNextCycle()
+                return@launch
+            }
+            val entryDecision = determineEntryDecision(report)
             updateState(state.copy(entryDecision = entryDecision))
             if (entryDecision != EntryDecision.ENTER_NOW) {
                 recordSkip(
@@ -510,7 +524,7 @@ class AutoTradingController(
             }
             updateState(state.copy(status = AutoTradingStatus.SELECTING_EXPIRATION))
             val expiration = prediction.expiration.seconds
-            if (expiration == null || expiration !in 15..180) {
+            if (expiration == null || expiration !in VALID_EXPIRATIONS) {
                 recordSkip("Экспирация не определена надёжно")
                 scheduleNextCycle()
                 return@launch
@@ -533,26 +547,86 @@ class AutoTradingController(
                 scheduleNextCycle()
                 return@launch
             }
-            if (!safety.isDuplicate(command.id)) {
-                val status = execution.prepare(command)
-                updateState(state.copy(
-                    status = AutoTradingStatus.EXECUTION_UNAVAILABLE,
-                    executionStatus = status,
-                    lastSkipReason = "Автоматическое исполнение недоступно",
-                ))
-            } else {
+            if (safety.isDuplicate(command.id)) {
                 recordSkip("Ошибка защиты от дублирующей команды")
                 scheduleNextCycle()
                 return@launch
             }
+            startExecution(command)
+        }
+    }
+
+    private fun startExecution(command: TradingExecutionCommand) {
+        executingCommandId = command.id
+        updateState(state.copy(
+            status = AutoTradingStatus.EXECUTING,
+            executionStatus = ExecutionStatus.EXECUTION_IN_PROGRESS,
+            lastSkipReason = "Проверка активного интерфейса перед единственной попыткой",
+        ))
+        executionTimeoutJob?.cancel()
+        executionTimeoutJob = scope.launch {
+            delay(EXECUTION_TIMEOUT_MS)
+            if (executingCommandId == command.id) {
+                completeExecution(
+                    command,
+                    ExecutionAttemptResult(
+                        ExecutionStatus.ACTION_PERFORMED_ACCEPTANCE_UNCONFIRMED,
+                        "Ответ службы Accessibility не получен; повторное нажатие запрещено",
+                    ),
+                )
+            }
+        }
+        execution.executeIfApproved(
+            command = command,
+            request = { item, callback ->
+                TradingAccessibilityService.requestExecution(item, callback)
+            },
+            callback = { result -> completeExecution(command, result) },
+        )
+    }
+
+    private fun completeExecution(
+        command: TradingExecutionCommand,
+        result: ExecutionAttemptResult,
+    ) {
+        scope.launch {
+            if (executingCommandId != command.id) return@launch
+            executionTimeoutJob?.cancel()
+            executionTimeoutJob = null
+            executingCommandId = null
+            if (result.status == ExecutionStatus.EXECUTION_IMPOSSIBLE) {
+                if (!state.running) {
+                    updateState(state.copy(
+                        executionStatus = result.status,
+                        lastSkipReason = result.detail,
+                    ))
+                } else {
+                    recordSkip(result.detail, result.status)
+                    scheduleNextCycle()
+                }
+                return@launch
+            }
+
+            nextCycleJob?.cancel()
+            nextCycleJob = null
+            captureTimeoutJob?.cancel()
+            captureTimeoutJob = null
+            cycleCoordinator.stop()
+            captureInProgress = false
+            if (projectionSessionStarted) stopCaptureAction?.invoke()
             updateState(state.copy(
-                completedCycles = state.completedCycles + 1,
-                status = AutoTradingStatus.EXECUTION_UNAVAILABLE,
-                executionStatus = ExecutionStatus.BLOCKED_NO_APPROVED_MECHANISM,
-                lastSkipReason = "АВТОМАТИЧЕСКОЕ ИСПОЛНЕНИЕ НЕДОСТУПНО",
+                running = false,
+                mode = TradingMode.MANUAL,
+                status = AutoTradingStatus.ERROR,
+                executionStatus = result.status,
                 lastConfirmedResult = verifier.notConfirmed(),
+                tradeCycleState = if (result.status == ExecutionStatus.PLATFORM_ACCEPTANCE_CONFIRMED) {
+                    TradeCycleState.OBSERVING
+                } else {
+                    TradeCycleState.BLOCKED_UNCONFIRMED
+                },
+                lastSkipReason = result.detail,
             ))
-            scheduleNextCycle()
         }
     }
 
@@ -565,6 +639,7 @@ class AutoTradingController(
         captureTimeoutJob = null
         analysisJob?.cancel()
         analysisJob = null
+        cancelPendingExecution()
         cycleCoordinator.stop()
         if (projectionSessionStarted) stopCaptureAction?.invoke()
         captureInProgress = false
@@ -580,18 +655,30 @@ class AutoTradingController(
         ))
     }
 
-    private fun recordSkip(reason: String) {
+    private fun recordSkip(
+        reason: String,
+        executionStatus: ExecutionStatus = ExecutionStatus.NOT_ATTEMPTED,
+    ) {
         updateState(state.copy(
             completedCycles = state.completedCycles + 1,
             skippedTrades = state.skippedTrades + 1,
             status = AutoTradingStatus.TRADE_SKIPPED,
             captureState = "ЗАХВАТ ЗАВЕРШЁН",
             lastSkipReason = reason,
-            executionStatus = ExecutionStatus.NOT_ATTEMPTED,
+            executionStatus = executionStatus,
         ))
     }
 
-    private fun determineEntryDecision(): EntryDecision = EntryDecision.WAIT_FOR_CONFIRMATION
+    private fun determineEntryDecision(report: AnalysisReport): EntryDecision =
+        if (report.tradingScreenDetected && report.timer != "НЕ ОПРЕДЕЛЕНО") {
+            EntryDecision.ENTER_NOW
+        } else {
+            EntryDecision.WAIT_FOR_CONFIRMATION
+        }
+
+    private fun cancelPendingExecution() {
+        executingCommandId?.let(TradingAccessibilityService::cancelExecution)
+    }
 
     private fun scheduleNextCycle() {
         if (!state.running) return
@@ -801,5 +888,8 @@ class AutoTradingController(
         private const val EXTRA_CONTINUOUS_SESSION = "continuous_session"
         private const val CYCLE_DELAY_MS = 5_000L
         private const val CAPTURE_TIMEOUT_MS = 30_000L
+        private const val EXECUTION_TIMEOUT_MS = 10_000L
+        private const val MIN_EXECUTION_CONFIDENCE = 0.68
+        private val VALID_EXPIRATIONS = setOf(15, 30, 60, 120, 180)
     }
 }

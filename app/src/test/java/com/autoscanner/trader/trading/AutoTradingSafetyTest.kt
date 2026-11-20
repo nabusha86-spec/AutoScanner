@@ -217,7 +217,7 @@ class AutoTradingSafetyTest {
             0.9,
             emptyList(),
         )
-        assertTrue(result.seconds == null || result.seconds!! in 15..180)
+        assertTrue(result.seconds == null || result.seconds in setOf(15, 30, 60, 120, 180))
     }
 
     @Test
@@ -225,6 +225,36 @@ class AutoTradingSafetyTest {
         val command = TradingExecutionCommand("test", PredictionDirection.BUY, "EUR/USD", 1.1, 10.0, 60)
         val status = TradingExecutionManager().executeIfApproved(command)
         assertEquals(ExecutionStatus.BLOCKED_NO_APPROVED_MECHANISM, status)
+    }
+
+    @Test
+    fun executionManagerAllowsAtMostOneAttemptForACommand() {
+        val manager = TradingExecutionManager()
+        val command = TradingExecutionCommand("single", PredictionDirection.BUY, "EUR/USD", 1.1, 1.0, 60)
+        var requests = 0
+        var result: ExecutionAttemptResult? = null
+        val request: (
+            TradingExecutionCommand,
+            (ExecutionAttemptResult) -> Unit,
+        ) -> Boolean = { _, complete ->
+            requests += 1
+            complete(
+                ExecutionAttemptResult(
+                    ExecutionStatus.ACTION_PERFORMED_ACCEPTANCE_UNCONFIRMED,
+                    "not confirmed",
+                ),
+            )
+            true
+        }
+
+        assertTrue(manager.executeIfApproved(command, request) { result = it })
+        assertEquals(1, requests)
+        assertEquals(ExecutionStatus.ACTION_PERFORMED_ACCEPTANCE_UNCONFIRMED, result?.status)
+
+        val duplicate = manager.executeIfApproved(command, request) { result = it }
+        assertFalse(duplicate)
+        assertEquals(1, requests)
+        assertEquals(ExecutionStatus.EXECUTION_IMPOSSIBLE, result?.status)
     }
 
     @Test

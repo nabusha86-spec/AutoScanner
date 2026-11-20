@@ -24,6 +24,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -39,7 +40,7 @@ import java.io.IOException
 import java.util.Locale
 
 class ScreenCaptureService : Service() {
-    private var projection: MediaProjection? = null
+    @Volatile private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var handlerThread: HandlerThread? = null
@@ -49,12 +50,13 @@ class ScreenCaptureService : Service() {
     private var lastSampleTimeMs = 0L
     private var captureStartedAtMs = 0L
     private var continuousSession = false
-    private var cycleActive = false
-    private var sessionEnded = false
+    @Volatile private var cycleActive = false
+    @Volatile private var sessionEnded = false
     private var singleFrameCapture = false
     private var automaticCaptureActive = false
     private var captureTimeout: Runnable? = null
     private var recordingEnabled = false
+    private var sessionInitializationPending = false
     private var overlayRoot: FrameLayout? = null
     private var overlayContent: LinearLayout? = null
     private var overlayBubble: Button? = null
@@ -79,8 +81,9 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        handlerThread = HandlerThread("screen-capture").also { it.start() }
-        handler = Handler(handlerThread!!.looper)
+        val thread = HandlerThread("screen-capture").also { it.start() }
+        handlerThread = thread
+        handler = Handler(thread.looper)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -116,7 +119,11 @@ class ScreenCaptureService : Service() {
                 } else {
                     val automatic = intent.action == ACTION_START_NEXT_CYCLE
                     if (automatic) continuousSession = true
-                    startCaptureWindow(preCaptureDelayMs = 0L, singleFrame = true, automatic = automatic)
+                    startCaptureWindow(
+                        preCaptureDelayMs = PANEL_HIDE_DELAY_MS,
+                        singleFrame = !automatic,
+                        automatic = automatic,
+                    )
                 }
                 return START_NOT_STICKY
             }
@@ -137,7 +144,10 @@ class ScreenCaptureService : Service() {
                     )
                     if (recordingEnabled) {
                         if (!cycleActive) {
-                            startCaptureWindow(preCaptureDelayMs = 0L, singleFrame = false)
+                            startCaptureWindow(
+                                preCaptureDelayMs = PANEL_HIDE_DELAY_MS,
+                                singleFrame = false,
+                            )
                         }
                     } else if (cycleActive) {
                         finishCaptureCycle()
@@ -159,6 +169,7 @@ class ScreenCaptureService : Service() {
                     automaticCaptureActive = false
                     captureDirectory?.deleteRecursively()
                 }
+                setOverlayVisible(true)
                 updateOverlayStatus(getString(R.string.auto_status_stopped))
                 return START_NOT_STICKY
             }
@@ -171,10 +182,12 @@ class ScreenCaptureService : Service() {
                 val result = intent.getStringExtra(EXTRA_RESULT_TEXT)
                 if (!result.isNullOrBlank()) {
                     overlayResult?.text = result
-                    val imagePath = intent.getStringExtra(EXTRA_RESULT_IMAGE)
-                    updateOverlayThumbnailText(imagePath)
+                    if (intent.hasExtra(EXTRA_RESULT_IMAGE)) {
+                        updateOverlayThumbnailText(intent.getStringExtra(EXTRA_RESULT_IMAGE))
+                    }
                     updateOverlayStatus(getString(R.string.analysis_complete))
                 }
+                setOverlayVisible(!intent.getBooleanExtra(EXTRA_KEEP_HIDDEN, false))
                 return START_NOT_STICKY
             }
             ACTION_SHOW_ERROR -> {
@@ -183,6 +196,7 @@ class ScreenCaptureService : Service() {
                         ?: getString(R.string.analysis_failed)
                     overlayResult?.text = message
                     updateOverlayStatus(message)
+                    setOverlayVisible(true)
                 } else {
                     sessionEnded = true
                     stopSelf(startId)
@@ -191,7 +205,9 @@ class ScreenCaptureService : Service() {
             }
         }
 
-        if (projection != null) {
+        if (intent?.action != ACTION_START_SESSION || projection != null ||
+            sessionInitializationPending
+        ) {
             return START_NOT_STICKY
         }
 
@@ -205,6 +221,7 @@ class ScreenCaptureService : Service() {
         continuousSession = intent.getBooleanExtra(EXTRA_CONTINUOUS_SESSION, false)
         try {
             startCaptureForeground()
+            sessionInitializationPending = true
             handler?.post(
                 {
                     try {
@@ -215,6 +232,8 @@ class ScreenCaptureService : Service() {
                         endSession(R.string.capture_storage_error)
                     } catch (_: IllegalStateException) {
                         endSession(R.string.capture_service_error)
+                    } catch (_: RuntimeException) {
+                        endSession(R.string.capture_service_error)
                     }
                 },
             )
@@ -222,10 +241,13 @@ class ScreenCaptureService : Service() {
             endSession(R.string.capture_permission_error)
         } catch (_: IllegalStateException) {
             endSession(R.string.capture_service_error)
+        } catch (_: RuntimeException) {
+            endSession(R.string.capture_service_error)
         }
         return START_NOT_STICKY
     }
 
+    @Synchronized
     private fun beginCaptureSession(resultCode: Int, resultData: Intent) {
         val mediaProjection = getSystemService(MediaProjectionManager::class.java)
             .getMediaProjection(resultCode, resultData)
@@ -246,15 +268,15 @@ class ScreenCaptureService : Service() {
             null,
             handler,
         )
+        sessionInitializationPending = false
         mainHandler.post {
-            createOverlay()
+            if (!sessionEnded) createOverlay()
             updateOverlayStatus(getString(R.string.capture_session_ready))
         }
         sendBroadcast(
             Intent(ACTION_SESSION_READY)
                 .setPackage(packageName),
         )
-        if (continuousSession) startCaptureWindow(preCaptureDelayMs = 0L, singleFrame = true)
     }
 
     private fun startCaptureWindow(
@@ -281,6 +303,7 @@ class ScreenCaptureService : Service() {
             singleFrameCapture = singleFrame
             automaticCaptureActive = automatic
             cycleActive = true
+            setOverlayVisible(false)
             updateOverlayStatus(getString(R.string.capture_getting_frame))
             captureTimeout = Runnable {
                     if (sampleCount == 0) {
@@ -306,10 +329,12 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    @Synchronized
     private fun onImageAvailable(reader: ImageReader) {
         val image = try {
             reader.acquireLatestImage()
         } catch (_: IllegalStateException) {
+            if (!sessionEnded) endSession(R.string.capture_processing_error)
             null
         } ?: return
 
@@ -388,15 +413,17 @@ class ScreenCaptureService : Service() {
         automaticCaptureActive = false
         captureTimeout?.let { handler?.removeCallbacks(it) }
         captureTimeout = null
+        if (recordingEnabled) {
+            recordingEnabled = false
+            sendBroadcast(
+                Intent(ACTION_RECORDING_STATE)
+                    .setPackage(packageName)
+                    .putExtra(EXTRA_RECORDING_ENABLED, false),
+            )
+        }
         sendCaptureResult(succeeded = true)
         mainHandler.post {
             updateOverlayStatus(getString(R.string.analysis_image_processing))
-        }
-        if (recordingEnabled) {
-            handler?.postDelayed(
-                { startCaptureWindow(preCaptureDelayMs = 0L, singleFrame = false) },
-                RECORDING_CYCLE_GAP_MS,
-            )
         }
     }
 
@@ -418,32 +445,71 @@ class ScreenCaptureService : Service() {
         errorResource: Int? = null,
         projectionAlreadyStopped: Boolean = false,
     ) {
-        if (sessionEnded) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { endSession(errorResource, projectionAlreadyStopped) }
+            return
+        }
+        if (sessionEnded) {
+            releaseProjectionResources(projectionAlreadyStopped)
+            removeOverlayOnMainThread()
+            return
+        }
         sessionEnded = true
+        sessionInitializationPending = false
         cycleActive = false
         automaticCaptureActive = false
         recordingEnabled = false
+        captureTimeout = null
         handler?.removeCallbacksAndMessages(null)
         if (errorResource != null) sendCaptureResult(succeeded = false, errorResource = errorResource)
         releaseProjectionResources(projectionAlreadyStopped)
-        mainHandler.post { removeOverlay() }
+        handlerThread?.quitSafely()
+        handlerThread = null
+        handler = null
+        removeOverlayOnMainThread()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    @Synchronized
     private fun releaseProjectionResources(projectionAlreadyStopped: Boolean = false) {
-        virtualDisplay?.release()
+        val display = virtualDisplay
         virtualDisplay = null
-        imageReader?.setOnImageAvailableListener(null, null)
-        imageReader?.close()
+        try {
+            display?.release()
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "VirtualDisplay was already released", error)
+        }
+        val reader = imageReader
         imageReader = null
-        projection?.let {
+        try {
+            reader?.setOnImageAvailableListener(null, null)
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "ImageReader listener was already detached", error)
+        }
+        try {
+            reader?.close()
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "ImageReader was already closed", error)
+        }
+        val mediaProjection = projection
+        projection = null
+        mediaProjection?.let {
             if (!projectionAlreadyStopped) {
-                it.unregisterCallback(projectionCallback)
-                it.stop()
+                try {
+                    it.unregisterCallback(projectionCallback)
+                } catch (error: IllegalStateException) {
+                    Log.w(TAG, "MediaProjection callback was already detached", error)
+                } catch (error: IllegalArgumentException) {
+                    Log.w(TAG, "MediaProjection callback was not registered", error)
+                }
+                try {
+                    it.stop()
+                } catch (error: IllegalStateException) {
+                    Log.w(TAG, "MediaProjection was already stopped", error)
+                }
             }
         }
-        projection = null
     }
 
     private fun screenDimensions(): Triple<Int, Int, Int> {
@@ -498,11 +564,21 @@ class ScreenCaptureService : Service() {
         }
 
     override fun onDestroy() {
-        if (!sessionEnded) {
-            endSession(R.string.capture_interrupted)
-        }
+        if (!sessionEnded) endSession(R.string.capture_interrupted)
+        handler?.removeCallbacksAndMessages(null)
+        releaseProjectionResources(projectionAlreadyStopped = true)
         handlerThread?.quitSafely()
+        handlerThread = null
+        handler = null
+        mainHandler.removeCallbacksAndMessages(null)
+        removeOverlay()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        endSession()
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun createOverlay() {
@@ -665,6 +741,12 @@ class ScreenCaptureService : Service() {
         mainHandler.post { overlayStatus?.text = text }
     }
 
+    private fun setOverlayVisible(visible: Boolean) {
+        mainHandler.post {
+            overlayRoot?.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+    }
+
     private fun updateOverlayControls() {
         mainHandler.post {
             overlayContent?.let { panel ->
@@ -677,16 +759,30 @@ class ScreenCaptureService : Service() {
     }
 
     private fun updateOverlayThumbnailText(imagePath: String?) {
-        if (!imagePath.isNullOrBlank() && File(imagePath).isFile) {
+        if (imagePath.isNullOrBlank() || !File(imagePath).isFile) {
             mainHandler.post {
+                lastThumbnail?.recycle()
+                lastThumbnail = null
+                overlayThumbnail?.setImageDrawable(null)
+                overlayThumbnail?.visibility = View.GONE
+                overlayResult?.contentDescription = null
+            }
+            return
+        }
+        mainHandler.post {
+            val bitmap = android.graphics.BitmapFactory.decodeFile(imagePath)
+            if (bitmap != null) {
+                lastThumbnail?.recycle()
+                lastThumbnail = bitmap
                 overlayResult?.contentDescription = imagePath
-                val bitmap = android.graphics.BitmapFactory.decodeFile(imagePath)
-                if (bitmap != null) {
-                    lastThumbnail?.recycle()
-                    lastThumbnail = bitmap
-                    overlayThumbnail?.setImageBitmap(bitmap)
-                    overlayThumbnail?.visibility = View.VISIBLE
-                }
+                overlayThumbnail?.setImageBitmap(bitmap)
+                overlayThumbnail?.visibility = View.VISIBLE
+            } else {
+                lastThumbnail?.recycle()
+                lastThumbnail = null
+                overlayThumbnail?.setImageDrawable(null)
+                overlayThumbnail?.visibility = View.GONE
+                overlayResult?.contentDescription = null
             }
         }
     }
@@ -699,14 +795,19 @@ class ScreenCaptureService : Service() {
     }
 
     private fun removeOverlay() {
-        overlayRoot?.let { root ->
+        val root = overlayRoot
+        overlayRoot = null
+        if (root != null) {
             try {
-                getSystemService(WindowManager::class.java).removeView(root)
+                root.visibility = View.GONE
+                overlayThumbnail?.setImageDrawable(null)
+                getSystemService(WindowManager::class.java).removeViewImmediate(root)
             } catch (_: IllegalArgumentException) {
                 // The system can remove an overlay while revoking its permission.
+            } catch (error: SecurityException) {
+                Log.w(TAG, "Overlay permission was revoked during removal", error)
             }
         }
-        overlayRoot = null
         overlayContent = null
         overlayBubble = null
         overlayStatus = null
@@ -715,6 +816,14 @@ class ScreenCaptureService : Service() {
         lastThumbnail?.recycle()
         lastThumbnail = null
         overlayLayoutParams = null
+    }
+
+    private fun removeOverlayOnMainThread() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            removeOverlay()
+        } else {
+            mainHandler.post { removeOverlay() }
+        }
     }
 
     private fun dp(value: Int): Int =
@@ -766,6 +875,7 @@ class ScreenCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        private const val TAG = "ScreenCaptureService"
         const val ACTION_CAPTURE_COMPLETE = "com.autoscanner.trader.CAPTURE_COMPLETE"
         const val ACTION_START_NEXT_CYCLE = "com.autoscanner.trader.START_NEXT_CAPTURE_CYCLE"
         const val ACTION_STOP_SESSION = "com.autoscanner.trader.STOP_CAPTURE_SESSION"
@@ -783,6 +893,7 @@ class ScreenCaptureService : Service() {
         const val ACTION_OVERLAY_STOP_AUTO = "com.autoscanner.trader.OVERLAY_STOP_AUTO"
         const val EXTRA_RESULT_TEXT = "analysis_result_text"
         const val EXTRA_RESULT_IMAGE = "analysis_result_image"
+        const val EXTRA_KEEP_HIDDEN = "keep_overlay_hidden"
         const val EXTRA_RECORDING_ENABLED = "recording_enabled"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
@@ -795,9 +906,9 @@ class ScreenCaptureService : Service() {
         const val EXTRA_CAPTURE_DURATION = "capture_duration"
 
         private const val CAPTURE_DURATION_MS = 15_000L
+        private const val PANEL_HIDE_DELAY_MS = 400L
         private const val SINGLE_FRAME_TIMEOUT_MS = 5_000L
         private const val SAMPLE_INTERVAL_MS = 500L
-        private const val RECORDING_CYCLE_GAP_MS = 500L
         private const val MAX_FRAME_DIMENSION = 960
         private const val JPEG_QUALITY = 75
         private const val NOTIFICATION_CHANNEL_ID = "screen_capture"

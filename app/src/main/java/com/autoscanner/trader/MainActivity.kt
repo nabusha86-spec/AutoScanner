@@ -277,6 +277,11 @@ class MainActivity : ComponentActivity() {
         autoTradingController = AutoTradingController(this)
         autoTradingController.setStateListener { state ->
             autoTradingState = state
+            if (state.status == AutoTradingStatus.WAITING_NEXT ||
+                (!state.running && state.tradeCycleState != com.autoscanner.trader.trading.TradeCycleState.NONE)
+            ) {
+                showOverlayExecutionStatus(state)
+            }
         }
         autoTradingController.setCaptureAction { intent ->
             val serviceIntent = Intent(this, ScreenCaptureService::class.java)
@@ -368,6 +373,7 @@ class MainActivity : ComponentActivity() {
                     autoTradingState = autoTradingState,
                     onStartAutoTrading = ::startAutoTrading,
                     onStopAutoTrading = ::stopAutoTrading,
+                    onOpenAccessibilitySettings = ::openAccessibilitySettings,
                     onEmergencyStop = ::emergencyStop,
                     onSetMode = ::setTradingMode,
                     onConfirmEmergency = ::confirmEmergencyResume,
@@ -381,6 +387,9 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         frameAnalysisJob?.cancel()
         autoTradingController.close()
+        if (isFinishing && !isChangingConfigurations) {
+            stopService(Intent(this, ScreenCaptureService::class.java))
+        }
         unregisterReceiver(captureReceiver)
         unregisterReceiver(overlayCommandReceiver)
         super.onDestroy()
@@ -507,6 +516,20 @@ class MainActivity : ComponentActivity() {
     private fun stopAutoTrading() {
         frameAnalysisJob?.cancel()
         autoTradingController.stop()
+        captureRunning = false
+        analysisRunning = false
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        } catch (error: android.content.ActivityNotFoundException) {
+            Log.e(TAG, "Accessibility settings are unavailable", error)
+            captureStatus = R.string.accessibility_settings_unavailable
+        } catch (error: SecurityException) {
+            Log.e(TAG, "Unable to open Accessibility settings", error)
+            captureStatus = R.string.accessibility_settings_unavailable
+        }
     }
 
     private fun emergencyStop() {
@@ -543,13 +566,13 @@ class MainActivity : ComponentActivity() {
             it == PredictionDirection.BUY || it == PredictionDirection.SELL
         } == true
         val summary = when {
-            !report.tradingScreenDetected -> getString(R.string.vision_warning_interface_none)
             prediction == null -> getString(R.string.analysis_not_ready)
             prediction.direction == PredictionDirection.BUY -> getString(R.string.overlay_direction_up)
             prediction.direction == PredictionDirection.SELL -> getString(R.string.overlay_direction_down)
+            !report.tradingScreenDetected -> getString(R.string.vision_warning_interface_none)
             else -> getString(R.string.overlay_no_signal)
         }
-        val confidence = prediction?.takeIf { signalIsDefined && it.confidence > 0.0 }
+        val confidence = prediction?.takeIf { signalIsDefined }
             ?.let { getString(R.string.forecast_confidence_inline, (it.confidence * 100).toInt()) }
             ?: getString(R.string.forecast_confidence_undefined)
         val expiration = prediction?.expiration?.seconds?.let {
@@ -567,15 +590,23 @@ class MainActivity : ComponentActivity() {
                 else -> report.marketMovement
             },
         ).joinToString("\n")
-        val imagePath = File(
+        val capturedImage = File(
             directory,
             "frame_%03d.jpg".format(Locale.US, report.processedFrames.coerceAtLeast(1)),
-        ).absolutePath
+        )
+        val previewImage = File(filesDir, "last-capture-preview.jpg")
+        val imagePath = try {
+            capturedImage.copyTo(previewImage, overwrite = true).absolutePath
+        } catch (error: IOException) {
+            Log.e(TAG, "Unable to preserve the latest capture preview", error)
+            null
+        }
         startService(
             Intent(this, ScreenCaptureService::class.java)
                 .setAction(ScreenCaptureService.ACTION_SHOW_RESULT)
                 .putExtra(ScreenCaptureService.EXTRA_RESULT_TEXT, resultText)
-                .putExtra(ScreenCaptureService.EXTRA_RESULT_IMAGE, imagePath),
+                .putExtra(ScreenCaptureService.EXTRA_RESULT_IMAGE, imagePath)
+                .putExtra(ScreenCaptureService.EXTRA_KEEP_HIDDEN, autoTradingState.running),
         )
     }
 
@@ -583,6 +614,20 @@ class MainActivity : ComponentActivity() {
         startService(
             Intent(this, ScreenCaptureService::class.java)
                 .setAction(ScreenCaptureService.ACTION_SHOW_ERROR)
+                .putExtra(ScreenCaptureService.EXTRA_RESULT_TEXT, message),
+        )
+    }
+
+    private fun showOverlayExecutionStatus(state: TradingSessionState) {
+        if (!captureSessionActive || isFinishing) return
+        val message = listOf(
+            getString(autoStatusResource(state.status)),
+            getString(executionStatusResource(state.executionStatus)),
+            state.lastSkipReason,
+        ).joinToString("\n")
+        startService(
+            Intent(this, ScreenCaptureService::class.java)
+                .setAction(ScreenCaptureService.ACTION_SHOW_RESULT)
                 .putExtra(ScreenCaptureService.EXTRA_RESULT_TEXT, message),
         )
     }
@@ -611,6 +656,7 @@ private fun AutoScannerApp(
     autoTradingState: TradingSessionState,
     onStartAutoTrading: () -> Unit,
     onStopAutoTrading: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
     onEmergencyStop: () -> Unit,
     onSetMode: (TradingMode) -> Unit,
     onConfirmEmergency: (Boolean) -> Unit,
@@ -658,6 +704,7 @@ private fun AutoScannerApp(
             AutoTradingCard(
                 state = autoTradingState,
                 onToggle = onStartAutoTrading,
+                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                 onEmergencyStop = onEmergencyStop,
                 onSetMode = onSetMode,
                 onConfirmEmergency = onConfirmEmergency,
@@ -706,6 +753,7 @@ private fun StatusCard(title: String, status: String, action: String, onAction: 
 private fun AutoTradingCard(
     state: TradingSessionState,
     onToggle: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
     onEmergencyStop: () -> Unit,
     onSetMode: (TradingMode) -> Unit,
     onConfirmEmergency: (Boolean) -> Unit,
@@ -748,6 +796,17 @@ private fun AutoTradingCard(
                 ) {
                     Text(stringResource(R.string.mode_auto))
                 }
+            }
+            Text(
+                stringResource(R.string.accessibility_setup_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+                onClick = onOpenAccessibilitySettings,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.accessibility_setup_button))
             }
             OutlinedTextField(
                 value = initialAmountText,
@@ -877,7 +936,8 @@ private fun AutoTradingCard(
                 enabled = state.running || (
                     state.mode == TradingMode.AUTO &&
                         !state.emergencyLocked &&
-                        state.tradeCycleState != com.autoscanner.trader.trading.TradeCycleState.BLOCKED_UNCONFIRMED
+                    state.tradeCycleState != com.autoscanner.trader.trading.TradeCycleState.BLOCKED_UNCONFIRMED &&
+                    state.tradeCycleState != com.autoscanner.trader.trading.TradeCycleState.OBSERVING
                     ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -1067,7 +1127,7 @@ private fun AnalysisCard(
                 )
             }
             Text(
-                stringResource(R.string.trade_execution_unavailable),
+                stringResource(R.string.trade_execution_notice),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -1272,6 +1332,10 @@ private fun executionStatusResource(status: ExecutionStatus): Int = when (status
     ExecutionStatus.BLOCKED_NO_APPROVED_MECHANISM -> R.string.execution_unavailable
     ExecutionStatus.BLOCKED_SAFETY -> R.string.execution_blocked_safety
     ExecutionStatus.RESULT_NOT_CONFIRMED -> R.string.execution_result_unconfirmed
+    ExecutionStatus.EXECUTION_IN_PROGRESS -> R.string.execution_in_progress
+    ExecutionStatus.ACTION_PERFORMED_ACCEPTANCE_UNCONFIRMED -> R.string.execution_action_unconfirmed
+    ExecutionStatus.PLATFORM_ACCEPTANCE_CONFIRMED -> R.string.execution_acceptance_confirmed
+    ExecutionStatus.EXECUTION_IMPOSSIBLE -> R.string.execution_impossible
 }
 
 private fun entryDecisionResource(decision: EntryDecision): Int = when (decision) {
@@ -1291,6 +1355,7 @@ private fun autoStatusResource(status: AutoTradingStatus): Int = when (status) {
     AutoTradingStatus.DETERMINING_DIRECTION -> R.string.auto_status_direction
     AutoTradingStatus.SELECTING_EXPIRATION -> R.string.auto_status_expiration
     AutoTradingStatus.SAFETY_CHECK -> R.string.auto_status_safety
+    AutoTradingStatus.EXECUTING -> R.string.auto_status_executing
     AutoTradingStatus.TRADE_SKIPPED -> R.string.auto_status_skipped
     AutoTradingStatus.EXECUTION_UNAVAILABLE -> R.string.auto_status_execution_unavailable
     AutoTradingStatus.WAITING_NEXT -> R.string.auto_status_waiting_next

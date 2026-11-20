@@ -17,29 +17,36 @@ class ExpirationSelector {
         confidence: Double,
         frames: List<FrameAnalysis>,
     ): ExpirationRecommendation {
-        if (direction == PredictionDirection.NO_TRADE || conflict || confidence < 0.68 ||
-            candleCount < 5
-        ) {
+        if (direction == PredictionDirection.NO_TRADE || candleCount == 0) {
             return ExpirationRecommendation(
                 seconds = null,
-                reason = "Прогноз не подтверждён или содержит конфликтующие признаки",
+                reason = "Направленные данные графика не распознаны",
                 usedIndicators = mapOf(
                     "Направление" to direction.name,
-                    "Конфликт" to conflict.toString(),
-                    "Уверенность" to confidence.toString(),
                 ),
                 confidence = confidence,
-                limitations = listOf("ЭКСПИРАЦИЯ НЕ ОПРЕДЕЛЕНА", "Дальнейшее исполнение заблокировано"),
+                limitations = listOf("ЭКСПИРАЦИЯ НЕ ОПРЕДЕЛЕНА"),
             )
         }
         val timeframeSeconds = parseTimeframe(timeframe)
         var targetSeconds = 60
         val reasons = mutableListOf<String>()
+        if (candleCount < 5) {
+            targetSeconds = 15
+            reasons += "Ограниченная история графика требует минимальной экспирации"
+        }
+        if (conflict || confidence < 0.68) {
+            targetSeconds = min(targetSeconds, 15)
+            reasons += "Низкая согласованность или качество анализа требует минимальной экспирации"
+        }
         if (momentum.strength >= 0.75) {
-            targetSeconds = 30
+            targetSeconds = min(targetSeconds, 30)
             reasons += "Сильный краткосрочный импульс"
         } else if (trend.confidence >= 0.68 && trend.strength >= 0.55) {
-            targetSeconds = if (timeframeSeconds != null) min(timeframeSeconds, 120) else 120
+            targetSeconds = min(
+                targetSeconds,
+                if (timeframeSeconds != null) min(timeframeSeconds, 120) else 120,
+            )
             reasons += "Устойчивое подтверждённое движение"
         }
         if (volatility.level in setOf(

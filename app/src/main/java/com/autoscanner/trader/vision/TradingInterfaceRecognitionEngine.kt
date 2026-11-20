@@ -137,7 +137,7 @@ class TradingInterfaceRecognitionEngine(
         private const val MAX_OTHER_ELEMENTS = 12
 
         private val PAIR_REGEX = Regex(
-            """\b(EUR|USD|GBP|JPY|CHF|AUD|NZD|CAD|CNY|HKD|SGD|ZAR|TRY|MXN|NOK|SEK|PLN|BTC|ETH|LTC|XAU|XAG)\s*[/\-]\s*(EUR|USD|GBP|JPY|CHF|AUD|NZD|CAD|CNY|HKD|SGD|ZAR|TRY|MXN|NOK|SEK|PLN|BTC|ETH|LTC|XAU|XAG)\b""",
+            """\b(EUR|USD|GBP|JPY|CHF|AUD|NZD|CAD|AED|CNY|HKD|SGD|ZAR|TRY|MXN|NOK|SEK|PLN|BTC|ETH|LTC|XAU|XAG)\s*[/\-]\s*(EUR|USD|GBP|JPY|CHF|AUD|NZD|CAD|AED|CNY|HKD|SGD|ZAR|TRY|MXN|NOK|SEK|PLN|BTC|ETH|LTC|XAU|XAG)\b""",
             RegexOption.IGNORE_CASE,
         )
         private val PRICE_REGEX = Regex("""(?<![\w:])\d{1,5}[.,]\d{3,8}(?!\d)""")

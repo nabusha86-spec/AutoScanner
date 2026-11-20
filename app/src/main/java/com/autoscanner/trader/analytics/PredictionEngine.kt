@@ -33,13 +33,31 @@ class PredictionEngine(
             weights.momentum, momentum.confidence, "Последовательность кадров и свечей")
         val bullishPatterns = candleAnalysis.patterns.count { it.direction == PatternDirection.BULLISH }
         val bearishPatterns = candleAnalysis.patterns.count { it.direction == PatternDirection.BEARISH }
-        val patternInfluence = if (bullishPatterns > bearishPatterns) DirectionInfluence.UP
-            else if (bearishPatterns > bullishPatterns) DirectionInfluence.DOWN
+        val bullishCandleStrength = candleAnalysis.candles
+            .filter { it.direction == CandleDirection.UP }
+            .sumOf { it.relativeStrength }
+        val bearishCandleStrength = candleAnalysis.candles
+            .filter { it.direction == CandleDirection.DOWN }
+            .sumOf { it.relativeStrength }
+        val bullishPatternStrength = candleAnalysis.patterns
+            .filter { it.direction == PatternDirection.BULLISH }
+            .sumOf { it.confidence }
+        val bearishPatternStrength = candleAnalysis.patterns
+            .filter { it.direction == PatternDirection.BEARISH }
+            .sumOf { it.confidence }
+        val bullishCandleScore = bullishCandleStrength + bullishPatternStrength
+        val bearishCandleScore = bearishCandleStrength + bearishPatternStrength
+        val totalCandleScore = bullishCandleScore + bearishCandleScore
+        val patternInfluence = if (bullishCandleScore > bearishCandleScore) DirectionInfluence.UP
+            else if (bearishCandleScore > bullishCandleScore) DirectionInfluence.DOWN
             else DirectionInfluence.NEUTRAL
         factors += SignalFactor("Свечные модели", "${bullishPatterns}/${bearishPatterns}",
             patternInfluence, weights.candles,
-            if (candleAnalysis.patterns.isEmpty()) 0.2 else candleAnalysis.patterns.maxOf { it.confidence },
-            "Распознавание геометрии свечей")
+            if (totalCandleScore == 0.0) 0.2 else {
+                maxOf(bullishCandleScore, bearishCandleScore) / totalCandleScore *
+                    (candleAnalysis.candles.size / 5.0).coerceIn(0.0, 1.0)
+            },
+            "Направление тел, их относительная сила и свечные модели")
 
         val exactIndicators = indicators.filter { it.exactValue != null }
         val visualIndicators = indicators.filter { it.visualApproximation != null }
@@ -74,18 +92,33 @@ class PredictionEngine(
             if (marketCondition == MarketCondition.UNDEFINED) 0.1 else trend.confidence,
             "Сводный анализ рынка")
 
-        val confidence = confidenceEngine.weightedConfidence(factors)
+        val factorConfidence = confidenceEngine.weightedConfidence(factors)
         val conflict = confidenceEngine.conflicts(factors)
         val upScore = factors.filter { it.influence == DirectionInfluence.UP }
             .sumOf { it.weight * it.confidence }
         val downScore = factors.filter { it.influence == DirectionInfluence.DOWN }
             .sumOf { it.weight * it.confidence }
+        val scoreTotal = upScore + downScore
+        val directionalMargin = if (scoreTotal > 0.0) {
+            kotlin.math.abs(upScore - downScore) / scoreTotal
+        } else {
+            0.0
+        }
         val reasons = mutableListOf<String>()
         val risks = mutableListOf<RiskFactor>()
         val adequateFrames = frames.count { it.quality.isAdequate }
         val tradingScreenRecognized = frames.any { it.tradingScreenDetected }
         val pairKnown = instrument != null && instrument != "НЕ ОПРЕДЕЛЕНО"
         val enoughCandles = candleAnalysis.candles.size >= 5
+        val chartAvailable = candleAnalysis.candles.isNotEmpty()
+        val qualityRatio = if (frames.isNotEmpty()) adequateFrames.toDouble() / frames.size else 0.0
+        val dataCoverage = when {
+            candleAnalysis.candles.size >= 10 -> 1.0
+            candleAnalysis.candles.size >= 5 -> 0.75
+            chartAvailable -> 0.4
+            else -> 0.0
+        }
+        val confidence = minOf(factorConfidence, directionalMargin) * qualityRatio * dataCoverage
 
         if (!tradingScreenRecognized) {
             risks += RiskFactor("Торговый интерфейс", "Торговый интерфейс не распознан")
@@ -101,23 +134,43 @@ class PredictionEngine(
             risks += RiskFactor("Рынок", "Рыночная ситуация не подтверждена")
         }
 
-        val direction = if (!tradingScreenRecognized || !pairKnown || !enoughCandles || adequateFrames == 0 ||
-            conflict || marketCondition == MarketCondition.UNDEFINED ||
-            !confidenceEngine.meetsMinimum(confidence)
-        ) {
-            PredictionDirection.NO_TRADE
-        } else if (upScore > downScore) {
+        val fallbackInfluence = when {
+            momentum.direction != DirectionInfluence.NEUTRAL -> momentum.direction
+            trendInfluence != DirectionInfluence.NEUTRAL -> trendInfluence
+            else -> candleAnalysis.candles.lastOrNull { it.direction != CandleDirection.DOJI }
+                ?.let {
+                    if (it.direction == CandleDirection.UP) DirectionInfluence.UP
+                    else DirectionInfluence.DOWN
+                } ?: DirectionInfluence.NEUTRAL
+        }
+        val direction = if (upScore > downScore) {
             reasons += "Совокупная оценка факторов поддерживает восходящее движение"
             PredictionDirection.BUY
         } else if (downScore > upScore) {
             reasons += "Совокупная оценка факторов поддерживает нисходящее движение"
             PredictionDirection.SELL
         } else {
-            PredictionDirection.NO_TRADE
+            when (fallbackInfluence) {
+                DirectionInfluence.UP -> {
+                    reasons += "При равных рейтингах направлений использовано последнее подтверждённое восходящее движение"
+                    PredictionDirection.BUY
+                }
+                DirectionInfluence.DOWN -> {
+                    reasons += "При равных рейтингах направлений использовано последнее подтверждённое нисходящее движение"
+                    PredictionDirection.SELL
+                }
+                DirectionInfluence.NEUTRAL -> PredictionDirection.NO_TRADE
+            }
         }
         if (direction == PredictionDirection.NO_TRADE) {
-            reasons += "Достаточного согласованного подтверждения нет; сделка не рекомендуется"
+            reasons += "На изображении не обнаружено направленных ценовых или свечных данных"
         } else {
+            if (!enoughCandles) {
+                risks += RiskFactor("История", "Предварительное направление основано на ограниченном числе свечей")
+            }
+            if (conflict) {
+                reasons += "Факторы противоречат друг другу; уверенность снижена"
+            }
             reasons += trend.explanation
             if (momentum.measuredSamples > 0) reasons += "Импульс подтверждён по ${momentum.measuredSamples} измерениям"
         }

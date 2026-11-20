@@ -16,6 +16,7 @@ enum class AutoTradingStatus {
     DETERMINING_DIRECTION,
     SELECTING_EXPIRATION,
     SAFETY_CHECK,
+    EXECUTING,
     TRADE_SKIPPED,
     EXECUTION_UNAVAILABLE,
     WAITING_NEXT,
@@ -52,7 +53,16 @@ enum class ExecutionStatus {
     BLOCKED_NO_APPROVED_MECHANISM,
     BLOCKED_SAFETY,
     RESULT_NOT_CONFIRMED,
+    EXECUTION_IN_PROGRESS,
+    ACTION_PERFORMED_ACCEPTANCE_UNCONFIRMED,
+    PLATFORM_ACCEPTANCE_CONFIRMED,
+    EXECUTION_IMPOSSIBLE,
 }
+
+data class ExecutionAttemptResult(
+    val status: ExecutionStatus,
+    val detail: String,
+)
 
 data class TradingSafetyLimits(
     val maxTradesPerSession: Int = 10,
@@ -105,7 +115,8 @@ data class TradingSessionState(
 
 fun TradingSessionState.automaticStartBlockReason(): String? = when {
     emergencyLocked -> "Автоматический запуск заблокирован до подтверждения пользователя"
-    tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED ->
+    tradeCycleState == TradeCycleState.BLOCKED_UNCONFIRMED ||
+        tradeCycleState == TradeCycleState.OBSERVING ->
         "Автоматическая торговля заблокирована до подтверждения результата сделки"
     mode != TradingMode.AUTO -> "Для запуска активируйте АВТОМАТИЧЕСКИЙ режим"
     else -> null
