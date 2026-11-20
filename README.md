@@ -57,10 +57,19 @@ Workflow `Android Build` находится в `.github/workflows/android-build.
 
 Workflow использует JDK 17 и существующий Gradle Wrapper, устанавливает Android SDK Platform 35 и Build Tools 35.0.0, проверяет зависимости, собирает debug APK и проверяет, что файл создан. Затем APK публикуется как downloadable artifact с именем `autoscanner-trader-debug-apk` и хранится 14 дней.
 
+Debug artifact предназначен только для разработки и не должен использоваться как релизный APK. Подписанный недебажный APK собирается при push тега `v*` или ручном запуске workflow. Для этого заранее настройте в GitHub Actions следующие secrets репозитория с существующим ключом подписи:
+
+- `ANDROID_RELEASE_KEYSTORE_BASE64` — keystore в кодировке Base64.
+- `ANDROID_RELEASE_STORE_PASSWORD` — пароль keystore.
+- `ANDROID_RELEASE_KEY_ALIAS` — alias ключа подписи.
+- `ANDROID_RELEASE_KEY_PASSWORD` — пароль ключа.
+
+Release job завершится ошибкой, если какого-либо секрета нет, APK допускает отладку или проверка подписи не проходит. APK загружается как artifact `autoscanner-trader-release-apk`; публикация GitHub Release не выполняется.
+
 Чтобы скачать APK:
 
 1. Откройте вкладку **Actions** репозитория и выберите успешный запуск **Android Build**.
 2. На странице запуска найдите раздел **Artifacts**.
 3. Скачайте `autoscanner-trader-debug-apk` — ZIP-архив содержит `app-debug.apk`.
 
-Для ручного запуска откройте **Actions → Android Build → Run workflow** и выберите ветку.
+Для ручного запуска откройте **Actions → Android Build → Run workflow** и выберите ветку. Также запустится сборка release APK, для которой нужны secrets подписи; результат доступен отдельно как `autoscanner-trader-release-apk`.
