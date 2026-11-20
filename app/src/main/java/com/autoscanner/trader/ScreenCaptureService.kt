@@ -39,6 +39,8 @@ import android.widget.TextView
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 class ScreenCaptureService : Service() {
@@ -48,6 +50,8 @@ class ScreenCaptureService : Service() {
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
     private var captureDirectory: File? = null
+    private var lastCaptureImagePath: String? = null
+    private var lastCaptureTimestampMs = 0L
     private var sampleCount = 0
     private var lastSampleTimeMs = 0L
     private var captureStartedAtMs = 0L
@@ -68,6 +72,7 @@ class ScreenCaptureService : Service() {
     private var overlayBubble: Button? = null
     private var overlayStatus: TextView? = null
     private var overlayResult: TextView? = null
+    private var overlayCaptureTime: TextView? = null
     private var overlayManualConfirmation: Button? = null
     private var overlayThumbnail: ImageView? = null
     private var lastThumbnail: Bitmap? = null
@@ -89,6 +94,10 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createCaptureHandler()
+    }
+
+    private fun createCaptureHandler() {
         val thread = HandlerThread("screen-capture").also { it.start() }
         handlerThread = thread
         handler = Handler(thread.looper)
@@ -101,6 +110,16 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
+        if (sessionEnded && intent?.action == ACTION_START_SESSION) {
+            handler?.removeCallbacksAndMessages(null)
+            handlerThread?.quitSafely()
+            handlerThread = null
+            handler = null
+            sessionEnded = false
+            sessionInitializationPending = false
+            recordingEnabled = false
+            createCaptureHandler()
+        }
         if (sessionEnded) return START_NOT_STICKY
 
         if (intent?.action == ACTION_QUERY_STATE) {
@@ -132,33 +151,54 @@ class ScreenCaptureService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_RECORDING -> {
-                if (capturePreparing || cycleActive || analysisPending) {
-                    Log.i(TAG, "Ignoring recording toggle while a capture cycle is active")
-                    return START_NOT_STICKY
-                }
                 if (projection == null) {
                     sendCaptureResult(succeeded = false, errorResource = R.string.capture_session_inactive)
-                    sessionEnded = true
-                    stopSelf(startId)
-                } else {
-                    recordingEnabled = !recordingEnabled
-                    sendBroadcast(
-                        Intent(ACTION_RECORDING_STATE)
-                            .setPackage(packageName)
-                            .putExtra(EXTRA_RECORDING_ENABLED, recordingEnabled),
-                    )
-                    updateOverlayStatus(
-                        getString(if (recordingEnabled) R.string.recording_enabled else R.string.recording_disabled),
-                    )
-                    if (recordingEnabled) {
-                        if (!cycleActive) {
-                            startCaptureWindow(
-                                singleFrame = false,
-                            )
-                        }
-                    }
-                    updateOverlayControls()
+                    return START_NOT_STICKY
                 }
+                if (analysisPending) {
+                    recordingEnabled = false
+                    sendRecordingState()
+                    updateOverlayStatus(getString(R.string.recording_disabled))
+                    updateOverlayControls()
+                    return START_NOT_STICKY
+                }
+                if (capturePreparing || cycleActive) {
+                    if (!recordingEnabled) {
+                        Log.i(TAG, "Ignoring recording toggle while a screenshot is active")
+                        return START_NOT_STICKY
+                    }
+                    recordingEnabled = false
+                    sendRecordingState()
+                    updateOverlayStatus(getString(R.string.recording_disabled))
+                    updateOverlayControls()
+                    if (capturePreparing) {
+                        cancelCaptureCycle()
+                        setOverlayVisible(true)
+                    } else if (sampleCount > 0) {
+                        finishCaptureCycle()
+                    } else {
+                        failCaptureCycle(R.string.capture_no_frames)
+                    }
+                    return START_NOT_STICKY
+                }
+                recordingEnabled = !recordingEnabled
+                sendRecordingState()
+                if (recordingEnabled) {
+                    updateOverlayStatus(
+                        getString(R.string.recording_enabled),
+                    )
+                    startCaptureWindow(singleFrame = false)
+                } else {
+                    updateOverlayStatus(getString(R.string.recording_disabled))
+                }
+                updateOverlayControls()
+                return START_NOT_STICKY
+            }
+            ACTION_ANALYSIS_FINISHED -> {
+                analysisPending = false
+                analysisTimeout?.let(mainHandler::removeCallbacks)
+                analysisTimeout = null
+                if (recordingEnabled && !sessionEnded) startCaptureWindow(singleFrame = false)
                 return START_NOT_STICKY
             }
             ACTION_SHOW_RESULT -> {
@@ -176,8 +216,8 @@ class ScreenCaptureService : Service() {
                         }
                         isEnabled = true
                     }
-                    if (intent.hasExtra(EXTRA_RESULT_IMAGE)) {
-                        updateOverlayThumbnailText(intent.getStringExtra(EXTRA_RESULT_IMAGE))
+                    intent.getStringExtra(EXTRA_RESULT_IMAGE)?.let { imagePath ->
+                        updateOverlayThumbnailText(imagePath, lastCaptureTimestampMs)
                     }
                     updateOverlayStatus(getString(R.string.analysis_complete))
                 }
@@ -221,22 +261,29 @@ class ScreenCaptureService : Service() {
                 {
                     try {
                         beginCaptureSession(resultCode, resultData)
-                    } catch (_: SecurityException) {
+                    } catch (error: SecurityException) {
+                        Log.e(TAG, "MediaProjection permission was rejected", error)
                         endSession(R.string.capture_permission_error)
-                    } catch (_: IOException) {
+                    } catch (error: IOException) {
+                        Log.e(TAG, "Unable to initialize capture storage", error)
                         endSession(R.string.capture_storage_error)
-                    } catch (_: IllegalStateException) {
+                    } catch (error: IllegalStateException) {
+                        Log.e(TAG, "Unable to initialize the capture session", error)
                         endSession(R.string.capture_service_error)
-                    } catch (_: RuntimeException) {
+                    } catch (error: RuntimeException) {
+                        Log.e(TAG, "Unexpected capture-session initialization failure", error)
                         endSession(R.string.capture_service_error)
                     }
                 },
             )
-        } catch (_: SecurityException) {
+        } catch (error: SecurityException) {
+            Log.e(TAG, "Unable to start the media-projection foreground service", error)
             endSession(R.string.capture_permission_error)
-        } catch (_: IllegalStateException) {
+        } catch (error: IllegalStateException) {
+            Log.e(TAG, "Unable to start the capture service", error)
             endSession(R.string.capture_service_error)
-        } catch (_: RuntimeException) {
+        } catch (error: RuntimeException) {
+            Log.e(TAG, "Unexpected failure while starting screen capture", error)
             endSession(R.string.capture_service_error)
         }
         return START_NOT_STICKY
@@ -262,7 +309,8 @@ class ScreenCaptureService : Service() {
             reader.surface,
             null,
             handler,
-        )
+        ) ?: throw IllegalStateException("MediaProjection did not create a virtual display")
+        Log.i(TAG, "VirtualDisplay ready: ${width}x$height @ $densityDpi dpi")
         sessionInitializationPending = false
         mainHandler.post {
             if (!sessionEnded) createOverlay()
@@ -293,6 +341,9 @@ class ScreenCaptureService : Service() {
             sampleCount = 0
             lastSampleTimeMs = 0L
             captureStartedAtMs = 0L
+            lastCaptureImagePath = null
+            lastCaptureTimestampMs = 0L
+            CapturedFrameStore.clear()
             singleFrameCapture = singleFrame
             overlayManualConfirmation?.apply {
                 visibility = View.GONE
@@ -384,35 +435,33 @@ class ScreenCaptureService : Service() {
         } ?: return
 
         image.use {
-            if (!cycleActive || it.timestamp < captureNotBeforeNanos) return
+            if (!cycleActive || SystemClock.elapsedRealtimeNanos() < captureNotBeforeNanos) return
             val now = System.currentTimeMillis()
             if (singleFrameCapture || now - lastSampleTimeMs >= SAMPLE_INTERVAL_MS) {
-                if (sampleCount == 0) updateOverlayStatus(getString(R.string.screen_received))
-                saveSample(it, now)
+                if (sampleCount == 0) {
+                    Log.i(
+                        TAG,
+                        "First frame received: ${it.width}x${it.height}, " +
+                            "format=${it.format}, timestamp=${it.timestamp}",
+                    )
+                    updateOverlayStatus(getString(R.string.screen_received))
+                }
+                val saved = saveSample(it, now)
+                if (!saved) return
                 lastSampleTimeMs = now
                 if (singleFrameCapture && cycleActive) finishCaptureCycle()
             }
         }
     }
 
-    private fun saveSample(image: Image, timestampMillis: Long) {
+    private fun saveSample(image: Image, timestampMillis: Long): Boolean {
         var bitmapToRecycle: Bitmap? = null
         try {
-            val plane = image.planes.firstOrNull() ?: return
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val paddedWidth = rowStride / pixelStride
-            val paddedBitmap = Bitmap.createBitmap(
-                paddedWidth,
-                image.height,
-                Bitmap.Config.ARGB_8888,
-            )
-            bitmapToRecycle = paddedBitmap
-            plane.buffer.rewind()
-            paddedBitmap.copyPixelsFromBuffer(plane.buffer)
-            val frameBitmap = Bitmap.createBitmap(paddedBitmap, 0, 0, image.width, image.height)
+            val frameBitmap = RgbaFrameConverter.toBitmap(image)
             bitmapToRecycle = frameBitmap
-            paddedBitmap.recycle()
+            if (frameBitmap.width <= 0 || frameBitmap.height <= 0) {
+                throw IOException("The captured frame is empty")
+            }
 
             val scale = minOf(
                 1f,
@@ -442,12 +491,20 @@ class ScreenCaptureService : Service() {
                 }
             }
             output.setLastModified(timestampMillis)
+            lastCaptureImagePath = output.absolutePath
+            lastCaptureTimestampMs = timestampMillis
+            CapturedFrameStore.replace(scaledBitmap)
+            bitmapToRecycle = null
             sampleCount += 1
-        } catch (_: IOException) {
+            return true
+        } catch (error: IOException) {
+            Log.e(TAG, "Unable to save captured frame", error)
             failCaptureCycle(R.string.capture_storage_error)
+            return false
         } catch (error: RuntimeException) {
             Log.e(TAG, "Unable to process captured image", error)
             failCaptureCycle(R.string.capture_processing_error)
+            return false
         } finally {
             bitmapToRecycle?.takeUnless(Bitmap::isRecycled)?.recycle()
         }
@@ -458,14 +515,7 @@ class ScreenCaptureService : Service() {
         cycleActive = false
         captureTimeout?.let { handler?.removeCallbacks(it) }
         captureTimeout = null
-        if (recordingEnabled) {
-            recordingEnabled = false
-            sendBroadcast(
-                Intent(ACTION_RECORDING_STATE)
-                    .setPackage(packageName)
-                    .putExtra(EXTRA_RECORDING_ENABLED, false),
-            )
-        }
+        updateOverlayThumbnailText(lastCaptureImagePath, lastCaptureTimestampMs)
         sendCaptureResult(succeeded = true)
         analysisPending = true
         analysisTimeout?.let(mainHandler::removeCallbacks)
@@ -476,9 +526,11 @@ class ScreenCaptureService : Service() {
             overlayManualConfirmation?.visibility = View.GONE
             updateOverlayStatus(message)
             setOverlayVisible(true)
+            if (recordingEnabled) startCaptureWindow(singleFrame = false)
         }.also { mainHandler.postDelayed(it, ANALYSIS_TIMEOUT_MS) }
         mainHandler.post {
             updateOverlayStatus(getString(R.string.analysis_image_processing))
+            setOverlayVisible(true)
         }
     }
 
@@ -491,7 +543,18 @@ class ScreenCaptureService : Service() {
                 .putExtra(EXTRA_ERROR_RESOURCE, errorResource ?: 0)
                 .putExtra(EXTRA_CAPTURE_DIRECTORY, captureDirectory?.absolutePath)
                 .putExtra(EXTRA_CAPTURE_STARTED_AT, captureStartedAtMs)
-                .putExtra(EXTRA_CAPTURE_DURATION, CAPTURE_DURATION_MS),
+                .putExtra(EXTRA_CAPTURE_DURATION, CAPTURE_DURATION_MS)
+                .putExtra(EXTRA_CAPTURE_IMAGE, lastCaptureImagePath)
+                .putExtra(EXTRA_CAPTURE_TIMESTAMP, lastCaptureTimestampMs)
+                .putExtra(EXTRA_SESSION_ACTIVE, projection != null && !sessionEnded),
+        )
+    }
+
+    private fun sendRecordingState() {
+        sendBroadcast(
+            Intent(ACTION_RECORDING_STATE)
+                .setPackage(packageName)
+                .putExtra(EXTRA_RECORDING_ENABLED, recordingEnabled),
         )
     }
 
@@ -575,6 +638,14 @@ class ScreenCaptureService : Service() {
 
     private fun screenDimensions(): Triple<Int, Int, Int> {
         val windowManager = getSystemService(WindowManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            return Triple(
+                bounds.width().coerceAtLeast(1),
+                bounds.height().coerceAtLeast(1),
+                resources.configuration.densityDpi,
+            )
+        }
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
         windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -631,6 +702,7 @@ class ScreenCaptureService : Service() {
         handlerThread?.quitSafely()
         handlerThread = null
         handler = null
+        CapturedFrameStore.clear()
         mainHandler.removeCallbacksAndMessages(null)
         removeOverlay()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -683,8 +755,9 @@ class ScreenCaptureService : Service() {
         overlayThumbnail = ImageView(this).apply {
             visibility = View.GONE
             adjustViewBounds = true
-            maxHeight = dp(72)
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            maxHeight = dp(124)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(220), dp(124))
             setOnClickListener {
                 val path = overlayResult?.contentDescription?.toString()
                 if (!path.isNullOrBlank()) {
@@ -697,6 +770,13 @@ class ScreenCaptureService : Service() {
             }
         }
         panel.addView(overlayThumbnail)
+        overlayCaptureTime = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(Color.LTGRAY)
+            textSize = 10f
+            setPadding(dp(4), 0, dp(4), dp(6))
+        }
+        panel.addView(overlayCaptureTime)
         panel.addView(buttonRow(
             overlayButton(R.string.manual_scan_button) {
                 startService(Intent(this, ScreenCaptureService::class.java).setAction(ACTION_CAPTURE_SINGLE))
@@ -858,31 +938,46 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun updateOverlayThumbnailText(imagePath: String?) {
+    private fun updateOverlayThumbnailText(imagePath: String?, timestampMillis: Long) {
         if (imagePath.isNullOrBlank() || !File(imagePath).isFile) {
             mainHandler.post {
-                lastThumbnail?.recycle()
-                lastThumbnail = null
-                overlayThumbnail?.setImageDrawable(null)
-                overlayThumbnail?.visibility = View.GONE
-                overlayResult?.contentDescription = null
+                overlayCaptureTime?.text = getString(R.string.capture_preview_failed)
+                overlayCaptureTime?.visibility = View.VISIBLE
+                updateOverlayStatus(getString(R.string.capture_preview_failed))
             }
             return
         }
         mainHandler.post {
+            if (overlayResult?.contentDescription == imagePath && overlayThumbnail?.drawable != null) {
+                overlayCaptureTime?.text = getString(
+                    R.string.screenshot_received_at,
+                    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestampMillis)),
+                )
+                overlayCaptureTime?.visibility = View.VISIBLE
+                return@post
+            }
             val bitmap = android.graphics.BitmapFactory.decodeFile(imagePath)
-            if (bitmap != null) {
+            if (bitmap != null && bitmap.width > 0 && bitmap.height > 0) {
                 lastThumbnail?.recycle()
                 lastThumbnail = bitmap
                 overlayResult?.contentDescription = imagePath
                 overlayThumbnail?.setImageBitmap(bitmap)
                 overlayThumbnail?.visibility = View.VISIBLE
+                overlayCaptureTime?.text = getString(
+                    R.string.screenshot_received_at,
+                    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestampMillis)),
+                )
+                overlayCaptureTime?.visibility = View.VISIBLE
+                updateOverlayStatus(getString(R.string.screenshot_received))
             } else {
                 lastThumbnail?.recycle()
                 lastThumbnail = null
                 overlayThumbnail?.setImageDrawable(null)
                 overlayThumbnail?.visibility = View.GONE
                 overlayResult?.contentDescription = null
+                overlayCaptureTime?.text = getString(R.string.capture_preview_failed)
+                overlayCaptureTime?.visibility = View.VISIBLE
+                updateOverlayStatus(getString(R.string.capture_preview_failed))
             }
         }
     }
@@ -914,6 +1009,7 @@ class ScreenCaptureService : Service() {
         overlayBubble = null
         overlayStatus = null
         overlayResult = null
+        overlayCaptureTime = null
         overlayManualConfirmation = null
         overlayThumbnail = null
         lastThumbnail?.recycle()
@@ -987,6 +1083,7 @@ class ScreenCaptureService : Service() {
         const val ACTION_TOGGLE_RECORDING = "com.autoscanner.trader.TOGGLE_RECORDING"
         const val ACTION_SHOW_RESULT = "com.autoscanner.trader.SHOW_ANALYSIS_RESULT"
         const val ACTION_SHOW_ERROR = "com.autoscanner.trader.SHOW_ANALYSIS_ERROR"
+        const val ACTION_ANALYSIS_FINISHED = "com.autoscanner.trader.ANALYSIS_FINISHED"
         const val ACTION_SESSION_READY = "com.autoscanner.trader.CAPTURE_SESSION_READY"
         const val ACTION_RECORDING_STATE = "com.autoscanner.trader.RECORDING_STATE"
         const val EXTRA_RESULT_TEXT = "analysis_result_text"
@@ -1002,6 +1099,9 @@ class ScreenCaptureService : Service() {
         const val EXTRA_CAPTURE_DIRECTORY = "capture_directory"
         const val EXTRA_CAPTURE_STARTED_AT = "capture_started_at"
         const val EXTRA_CAPTURE_DURATION = "capture_duration"
+        const val EXTRA_CAPTURE_IMAGE = "capture_image"
+        const val EXTRA_CAPTURE_TIMESTAMP = "capture_timestamp"
+        const val EXTRA_SESSION_ACTIVE = "capture_session_active"
 
         private const val CAPTURE_DURATION_MS = 15_000L
         private const val ANALYSIS_TIMEOUT_MS = 120_000L

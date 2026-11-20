@@ -4,7 +4,7 @@ import com.autoscanner.trader.vision.FrameAnalysis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class AIAnalyticsEngine(
+class AnalyticsCoordinator(
     private val weights: PredictionWeights = PredictionWeights(),
     private val minimumConfidence: Double = 0.68,
 ) {

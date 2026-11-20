@@ -126,7 +126,7 @@ jobs:
           test -s "$APK"
           BADGING=$("${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK")
           printf '%s\n' "$BADGING"
-          printf '%s\n' "$BADGING" | grep -q "^package: name='com.autoscanner.trader' versionCode='7' versionName='0.2.5'"
+          printf '%s\n' "$BADGING" | grep -q "^package: name='com.autoscanner.trader' versionCode='8' versionName='0.2.6'"
           if "${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK" | grep -q '^application-debuggable'; then
             echo "Release APK must not be debuggable"
             exit 1
@@ -147,12 +147,13 @@ jobs:
             echo "Release APK certificate fingerprint does not match ANDROID_RELEASE_CERT_SHA256"
             exit 1
           fi
+          cp "$APK" app/build/outputs/apk/release/AutoScanner-Trader.apk
 
       - name: Upload signed release APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: autoscanner-trader-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/AutoScanner-Trader.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -161,12 +162,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          APK=app/build/outputs/apk/release/app-release.apk
+          APK=app/build/outputs/apk/release/AutoScanner-Trader.apk
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$APK" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "$APK" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "AutoScanner Trader 0.2.5" \
-              --notes "Signed release APK. Package: com.autoscanner.trader; versionCode: 7; versionName: 0.2.5. The build verifies the pinned release certificate fingerprint."
+              --title "AutoScanner Trader 0.2.6" \
+              --notes "Signed release APK. Package: com.autoscanner.trader; versionCode: 8; versionName: 0.2.6. The build verifies the pinned release certificate fingerprint."
           fi

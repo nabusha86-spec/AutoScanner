@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
@@ -52,7 +53,6 @@ import com.autoscanner.trader.vision.AnalysisReport
 import com.autoscanner.trader.vision.FrameProcessingEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import java.io.File
 import java.io.IOException
 
 class MainActivity : ComponentActivity() {
@@ -89,11 +89,17 @@ class MainActivity : ComponentActivity() {
             }
 
             captureRunning = false
+            captureSessionActive = intent.getBooleanExtra(
+                ScreenCaptureService.EXTRA_SESSION_ACTIVE,
+                captureSessionActive,
+            )
+            if (!captureSessionActive) recordingEnabled = false
             capturedFrames = intent.getIntExtra(ScreenCaptureService.EXTRA_FRAMES, 0)
             val succeeded = intent.getBooleanExtra(ScreenCaptureService.EXTRA_SUCCEEDED, false)
             captureStatus = if (succeeded) R.string.capture_completed else R.string.capture_failed
             resultStatus = if (succeeded) R.string.analysis_processing else R.string.capture_error
             if (!succeeded) {
+                CapturedFrameStore.clear()
                 analysisReport = null
                 analysisError = null
                 val errorResource = intent.getIntExtra(
@@ -116,20 +122,29 @@ class MainActivity : ComponentActivity() {
             manualConfirmationReceived = false
             analysisRunning = true
             val directory = intent.getStringExtra(ScreenCaptureService.EXTRA_CAPTURE_DIRECTORY)
+            val imagePath = intent.getStringExtra(ScreenCaptureService.EXTRA_CAPTURE_IMAGE)
+            val captureTimestamp = intent.getLongExtra(ScreenCaptureService.EXTRA_CAPTURE_TIMESTAMP, 0L)
+            val screenshotBitmap = CapturedFrameStore.take()
             if (directory.isNullOrBlank()) {
+                screenshotBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
                 analysisRunning = false
                 resultStatus = R.string.analysis_failed
                 val message = getString(R.string.analysis_directory_missing)
                 analysisError = message
                 showOverlayError(message)
+                startService(
+                    Intent(this@MainActivity, ScreenCaptureService::class.java)
+                        .setAction(ScreenCaptureService.ACTION_ANALYSIS_FINISHED),
+                )
                 return
             }
             lifecycleScope.launch {
                 try {
-                    val report = FrameProcessingEngine(this@MainActivity).processSequence(directory)
+                    val report = FrameProcessingEngine(this@MainActivity)
+                        .processSequence(directory, screenshotBitmap)
                     analysisReport = report
                     resultStatus = R.string.analysis_complete
-                    showOverlayResult(report, directory)
+                    showOverlayResult(report, imagePath, captureTimestamp)
                 } catch (error: IOException) {
                     Log.e(TAG, "Frame sequence analysis failed", error)
                     resultStatus = R.string.analysis_failed
@@ -146,7 +161,12 @@ class MainActivity : ComponentActivity() {
                     analysisError = message
                     showOverlayError(message)
                 } finally {
+                    screenshotBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
                     analysisRunning = false
+                    startService(
+                        Intent(this@MainActivity, ScreenCaptureService::class.java)
+                            .setAction(ScreenCaptureService.ACTION_ANALYSIS_FINISHED),
+                    )
                 }
             }
         }
@@ -218,7 +238,7 @@ class MainActivity : ComponentActivity() {
                     captureStatus = captureStatus,
                     resultStatus = resultStatus,
                     capturedFrames = capturedFrames,
-                    captureRunning = captureRunning || analysisRunning,
+                    captureRunning = captureRunning,
                     captureSessionActive = captureSessionActive,
                     recordingEnabled = recordingEnabled,
                     analysisReport = analysisReport,
@@ -341,7 +361,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showOverlayResult(report: AnalysisReport, directory: String) {
+    private fun showOverlayResult(
+        report: AnalysisReport,
+        imagePath: String?,
+        captureTimestamp: Long,
+    ) {
         val prediction = report.prediction
         val hasSignal = prediction?.direction == PredictionDirection.BUY ||
             prediction?.direction == PredictionDirection.SELL
@@ -350,29 +374,54 @@ class MainActivity : ComponentActivity() {
             PredictionDirection.SELL -> getString(R.string.overlay_direction_down)
             PredictionDirection.NO_TRADE, null -> getString(R.string.overlay_no_signal)
         }
-        val confidence = prediction?.takeIf { hasSignal }
+        val confidence = prediction
             ?.let { getString(R.string.forecast_confidence_inline, (it.confidence * 100).toInt()) }
             ?: getString(R.string.forecast_confidence_undefined)
-        val explanation = prediction?.reasons?.firstOrNull()
-            ?: report.marketMovement
+        val upScore = prediction?.upScorePercent
+            ?.let { getString(R.string.overlay_score_percent, it) }
+            ?: getString(R.string.undetermined)
+        val downScore = prediction?.downScorePercent
+            ?.let { getString(R.string.overlay_score_percent, it) }
+            ?: getString(R.string.undetermined)
+        val engines = prediction?.engineAssessments.orEmpty()
+        val failedEngines = engines.filterNot { it.successful }
+        val engineSummary = getString(
+            R.string.overlay_engine_summary,
+            engines.count { it.successful },
+            engines.size,
+        )
+        val reasons = prediction?.reasons.orEmpty().take(2)
+        val explanation = reasons.ifEmpty { listOf(report.marketMovement) }
+            .joinToString("\n") { getString(R.string.analysis_list_item, it) }
+        val insufficientData = prediction?.direction == PredictionDirection.NO_TRADE
+        val warning = buildList {
+            if (insufficientData) add(getString(R.string.overlay_insufficient_data))
+            if (failedEngines.isNotEmpty()) {
+                add(getString(
+                    R.string.overlay_failed_engines,
+                    failedEngines.joinToString { it.name },
+                ))
+            }
+            val directions = engines.filter {
+                    it.successful && it.direction != com.autoscanner.trader.analytics.DirectionInfluence.NEUTRAL
+                }.map { it.direction }.distinct()
+            if (directions.size > 1) add(getString(R.string.overlay_engine_conflict))
+        }.takeIf { it.isNotEmpty() }?.joinToString("\n")
         val resultText = listOf(
+            getString(R.string.screenshot_received_at, java.text.SimpleDateFormat(
+                "HH:mm:ss",
+                java.util.Locale.getDefault(),
+            ).format(java.util.Date(captureTimestamp))),
             getString(R.string.screenshot_analyzed),
             direction,
+            getString(R.string.overlay_score_up, upScore),
+            getString(R.string.overlay_score_down, downScore),
             getString(R.string.overlay_confidence_inline, confidence),
+            engineSummary,
             explanation,
+            warning,
             getString(R.string.manual_execution_only),
-        ).joinToString("\n")
-        val capturedImage = File(
-            directory,
-            "frame_%03d.jpg".format(java.util.Locale.US, report.processedFrames.coerceAtLeast(1)),
-        )
-        val previewImage = File(filesDir, "last-capture-preview.jpg")
-        val imagePath = try {
-            capturedImage.copyTo(previewImage, overwrite = true).absolutePath
-        } catch (error: IOException) {
-            Log.e(TAG, "Unable to preserve the latest capture preview", error)
-            null
-        }
+        ).filterNotNull().joinToString("\n")
         startService(
             Intent(this, ScreenCaptureService::class.java)
                 .setAction(ScreenCaptureService.ACTION_SHOW_RESULT)

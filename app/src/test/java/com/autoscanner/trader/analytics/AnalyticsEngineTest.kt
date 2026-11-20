@@ -126,6 +126,8 @@ class AnalyticsEngineTest {
         assertEquals(PredictionDirection.NO_TRADE, result.direction)
         assertNotNull(result.expiration.limitations)
         assertNull(result.expiration.seconds)
+        assertEquals(8, result.engineAssessments.size)
+        assertTrue(result.engineAssessments.any { !it.successful })
     }
 
     @Test
@@ -153,7 +155,7 @@ class AnalyticsEngineTest {
     }
 
     @Test
-    fun chartDataProducesUpDirectionWithoutRecognizedTradingInterface() {
+    fun shortChartWithDirectionalCandlesDoesNotForceLowConfidenceSignal() {
         val candles = (0 until 6).map { index ->
             val top = 40 - index * 2
             Candle(index + 1, index * 5, top, index * 5 + 3, top + 8,
@@ -166,38 +168,61 @@ class AnalyticsEngineTest {
 
         val result = MarketAnalysisEngine().runBlockingAnalyze(
             frames,
-            "НЕ ОПРЕДЕЛЕНО",
-            "НЕ ОПРЕДЕЛЕНО",
+            "EUR/USD",
+            "1.1000",
             "M1",
         )
 
-        assertEquals(PredictionDirection.BUY, result.direction)
+        assertEquals(PredictionDirection.NO_TRADE, result.direction)
         assertTrue(result.confidence > 0.0)
         assertTrue(result.confidence <= 1.0)
-        assertNotNull(result.expiration.seconds)
+        assertTrue(result.reasons.any { it.contains("НЕТ НАДЁЖНОГО СИГНАЛА") })
+        assertNull(result.expiration.seconds)
     }
 
     @Test
-    fun chartDataProducesDownDirectionWithoutRecognizedTradingInterface() {
-        val candles = (0 until 6).map { index ->
-            val top = 30 + index * 2
+    fun sufficientlySupportedUpwardChartProducesWeightedSignal() {
+        val candles = (0 until 40).map { index ->
+            val top = 60 - index
             Candle(index + 1, index * 5, top, index * 5 + 3, top + 8,
-                top, top + 8, "КРАСНАЯ", top + 8)
+                top, top + 8, "ЗЕЛЁНАЯ", top)
         }
         val frames = (1..6).map {
-            frame(candles, instrument = "НЕ ОПРЕДЕЛЕНО", price = "НЕ ОПРЕДЕЛЕНО")
-                .copy(tradingScreenDetected = false)
+            frame(candles).copy(tradingScreenDetected = true)
         }
 
         val result = MarketAnalysisEngine().runBlockingAnalyze(
             frames,
-            "НЕ ОПРЕДЕЛЕНО",
-            "НЕ ОПРЕДЕЛЕНО",
+            "EUR/USD",
+            "1.1000",
             "M1",
         )
 
-        assertEquals(PredictionDirection.SELL, result.direction)
-        assertTrue(result.confidence in 0.0..1.0)
+        assertEquals(result.toString(), PredictionDirection.BUY, result.direction)
+        assertTrue(result.confidence >= 0.68)
+        assertEquals(100, result.upScorePercent!! + result.downScorePercent!!)
+        assertTrue(result.engineAssessments.any { it.name == "Технические индикаторы" && it.successful })
+        assertTrue(result.engineAssessments.all { it.confidence in 0.0..1.0 })
+    }
+
+    @Test
+    fun technicalIndicatorsAreCalculatedFromRecognizedCandleGeometry() {
+        val candles = (0 until 40).map { index ->
+            val top = 60 - index
+            candle(index + 1, top.toDouble()).copy(
+                open = -(top + 8.0),
+                close = -top.toDouble(),
+                high = -(top - 2.0),
+                low = -(top + 10.0),
+            )
+        }
+
+        val result = IndicatorAnalysisEngine().analyze(emptyList(), candles)
+
+        assertTrue(result.any { it.name.startsWith("RSI(14)") })
+        assertTrue(result.any { it.name == "MACD • геометрия графика" })
+        assertTrue(result.any { it.name.startsWith("Bollinger Bands") })
+        assertTrue(result.all { it.exactValue == null })
     }
 
     @Test
@@ -260,6 +285,23 @@ class AnalyticsEngineTest {
         )
         val confidence = SignalConfidenceEngine(0.68).weightedConfidence(factors)
         assertFalse(SignalConfidenceEngine(0.68).meetsMinimum(confidence))
+    }
+
+    @Test
+    fun conflictingVotesReduceWeightedConfidence() {
+        val engine = SignalConfidenceEngine()
+        val aligned = listOf(
+            SignalFactor("trend", "up", DirectionInfluence.UP, 0.5, 0.9, "test"),
+            SignalFactor("momentum", "up", DirectionInfluence.UP, 0.5, 0.9, "test"),
+        )
+        val conflicting = listOf(
+            aligned[0],
+            aligned[1].copy(influence = DirectionInfluence.DOWN),
+        )
+
+        assertFalse(engine.conflicts(aligned))
+        assertTrue(engine.conflicts(conflicting))
+        assertTrue(engine.weightedConfidence(conflicting) < engine.weightedConfidence(aligned))
     }
 
     private fun MarketAnalysisEngine.runBlockingAnalyze(

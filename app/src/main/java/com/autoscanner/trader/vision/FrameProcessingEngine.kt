@@ -4,8 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.autoscanner.trader.R
-import com.autoscanner.trader.analytics.AIAnalyticsEngine
+import com.autoscanner.trader.analytics.AnalyticsCoordinator
+import com.autoscanner.trader.analytics.DirectionInfluence
+import com.autoscanner.trader.analytics.EngineAssessment
 import com.autoscanner.trader.analytics.ForecastHistoryStore
+import com.autoscanner.trader.analytics.RiskFactor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -21,7 +24,21 @@ class FrameProcessingEngine(context: Context) {
     private val appContext = context.applicationContext
     private val strings = VisionStrings(appContext)
 
-    suspend fun processSequence(directoryPath: String): AnalysisReport = withContext(Dispatchers.IO) {
+    suspend fun processSequence(
+        directoryPath: String,
+        screenshotBitmap: Bitmap? = null,
+    ): AnalysisReport = withContext(Dispatchers.IO) {
+        try {
+            processSequenceInternal(directoryPath, screenshotBitmap)
+        } finally {
+            screenshotBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
+        }
+    }
+
+    private suspend fun processSequenceInternal(
+        directoryPath: String,
+        screenshotBitmap: Bitmap?,
+    ): AnalysisReport {
         val directory = File(directoryPath)
         if (!directory.isDirectory) throw IOException(strings.get(R.string.vision_error_capture_directory))
         val frameFiles = directory.listFiles { file ->
@@ -66,7 +83,10 @@ class FrameProcessingEngine(context: Context) {
                     ?.toIntOrNull() ?: fileIndex + 1
                 val timestamp = file.lastModified().takeIf { it > 0L } ?: 0L
                 val frameErrors = mutableListOf<String>()
-                val bitmap = try {
+                val bitmap = if (
+                    frameFiles.size == 1 && fileIndex == 0 &&
+                    screenshotBitmap != null && !screenshotBitmap.isRecycled
+                ) screenshotBitmap else try {
                     BitmapFactory.decodeFile(file.absolutePath)
                 } catch (_: RuntimeException) {
                     frameErrors += strings.get(R.string.vision_error_decode)
@@ -181,7 +201,7 @@ class FrameProcessingEngine(context: Context) {
                     previousBitmap?.recycle()
                     previousBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
                 } finally {
-                    bitmap.recycle()
+                    if (bitmap !== screenshotBitmap) bitmap.recycle()
                 }
             }
         } finally {
@@ -189,15 +209,23 @@ class FrameProcessingEngine(context: Context) {
             ocrProcessor?.close()
         }
 
-        val report = aggregate(frames, errors, directory)
+        val report = aggregate(
+            frames = frames,
+            initializationErrors = errors,
+            directory = directory,
+            openCvAvailable = openCvAvailable,
+            ocrInitialized = ocrProcessor != null,
+        )
         persistReport(report, directory)
-        report
+        return report
     }
 
     private suspend fun aggregate(
         frames: List<FrameAnalysis>,
         initializationErrors: List<String>,
         directory: File,
+        openCvAvailable: Boolean,
+        ocrInitialized: Boolean,
     ): AnalysisReport {
         val allErrors = (initializationErrors + frames.flatMap { frame ->
             frame.errors.map { strings.get(R.string.vision_frame_error, frame.sequence, it) }
@@ -258,14 +286,58 @@ class FrameProcessingEngine(context: Context) {
             reportPath = File(directory, REPORT_FILE_NAME).absolutePath,
             prediction = null,
         )
-        val prediction = AIAnalyticsEngine().analyze(
+        val prediction = AnalyticsCoordinator().analyze(
             frames = frames,
             instrument = baseReport.instrument,
             price = baseReport.price,
             timeframe = baseReport.timeframe,
         )
-        val report = baseReport.copy(prediction = prediction)
-        ForecastHistoryStore(appContext).append(prediction, qualitySummary)
+        val visionEngines = listOf(
+            EngineAssessment(
+                name = "OpenCV / свечная геометрия",
+                direction = DirectionInfluence.NEUTRAL,
+                confidence = if (frames.any { it.chart.detected }) 0.7 else 0.0,
+                weight = 0.0,
+                successful = openCvAvailable && frames.any { it.chart.detected },
+                failureReason = when {
+                    !openCvAvailable -> "OpenCV не инициализирован"
+                    frames.none { it.chart.detected } -> "Область графика или свечи не распознаны"
+                    else -> null
+                },
+            ),
+            EngineAssessment(
+                name = "OCR Tesseract",
+                direction = DirectionInfluence.NEUTRAL,
+                confidence = if (frames.any { it.textBoxes.isNotEmpty() }) 0.65 else 0.0,
+                weight = 0.0,
+                successful = ocrInitialized && frames.any { it.textBoxes.isNotEmpty() },
+                failureReason = when {
+                    !ocrInitialized -> "OCR не запущен"
+                    frames.none { it.textBoxes.isNotEmpty() } -> "Текст на кадрах не распознан"
+                    else -> null
+                },
+            ),
+            EngineAssessment(
+                name = "Распознавание Pocket Option",
+                direction = DirectionInfluence.NEUTRAL,
+                confidence = if (frames.any { it.tradingScreenDetected }) 0.6 else 0.0,
+                weight = 0.0,
+                successful = frames.any { it.tradingScreenDetected },
+                failureReason = if (frames.any { it.tradingScreenDetected }) null else
+                    "Интерфейс Pocket Option не подтверждён",
+            ),
+        )
+        val combinedPrediction = prediction.copy(
+            risks = prediction.risks + visionEngines.filterNot { it.successful }.map { engine ->
+                RiskFactor(
+                    "Движок ${engine.name}",
+                    engine.failureReason ?: "Модуль не предоставил результат",
+                )
+            },
+            engineAssessments = visionEngines + prediction.engineAssessments,
+        )
+        val report = baseReport.copy(prediction = combinedPrediction)
+        ForecastHistoryStore(appContext).append(combinedPrediction, qualitySummary)
         return report
     }
 
@@ -363,6 +435,8 @@ class FrameProcessingEngine(context: Context) {
                 JSONObject()
                     .put("direction", prediction.direction.name)
                     .put("confidence", prediction.confidence)
+                    .put("upScorePercent", prediction.upScorePercent ?: JSONObject.NULL)
+                    .put("downScorePercent", prediction.downScorePercent ?: JSONObject.NULL)
                     .put("instrument", prediction.instrument ?: JSONObject.NULL)
                     .put("currentPrice", prediction.currentPrice ?: JSONObject.NULL)
                     .put("analysisTimeMillis", prediction.analysisTimeMillis)
@@ -386,6 +460,15 @@ class FrameProcessingEngine(context: Context) {
                             .put("weight", factor.weight)
                             .put("confidence", factor.confidence)
                             .put("source", factor.source)
+                    }))
+                    .put("engines", JSONArray(prediction.engineAssessments.map { engine ->
+                        JSONObject()
+                            .put("name", engine.name)
+                            .put("direction", engine.direction.name)
+                            .put("confidence", engine.confidence)
+                            .put("weight", engine.weight)
+                            .put("successful", engine.successful)
+                            .put("failureReason", engine.failureReason ?: JSONObject.NULL)
                     }))
                     .put("candlePatterns", JSONArray(prediction.candlePatterns.map { pattern ->
                         JSONObject()

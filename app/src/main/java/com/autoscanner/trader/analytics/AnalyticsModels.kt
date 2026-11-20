@@ -166,6 +166,15 @@ data class RiskFactor(
     val description: String,
 )
 
+data class EngineAssessment(
+    val name: String,
+    val direction: DirectionInfluence,
+    val confidence: Double,
+    val weight: Double,
+    val successful: Boolean,
+    val failureReason: String? = null,
+)
+
 data class PredictionWeights(
     val trend: Double = 0.28,
     val momentum: Double = 0.20,
@@ -202,6 +211,9 @@ data class PredictionResult(
     val risks: List<RiskFactor>,
     val factors: List<SignalFactor>,
     val expiration: ExpirationRecommendation,
+    val upScorePercent: Int? = null,
+    val downScorePercent: Int? = null,
+    val engineAssessments: List<EngineAssessment> = emptyList(),
 )
 
 data class MlFeatureVector(
