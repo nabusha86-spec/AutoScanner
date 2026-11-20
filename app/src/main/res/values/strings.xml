@@ -158,7 +158,7 @@
     <string name="capture_notification_channel">ЗАХВАТ ЭКРАНА</string>
     <string name="capture_notification_text">СЕССИЯ ЗАХВАТА ЭКРАНА АКТИВНА</string>
     <string name="accessibility_service_label">AutoScanner: торговый экран</string>
-    <string name="accessibility_service_description">Используется только по явной команде пользователя для поиска однозначных доступных кнопок BUY/SELL на уже открытом экране Pocket Option. Сервис не выполняет вход, не использует API и не нажимает координаты. При неоднозначном интерфейсе действие блокируется.</string>
+    <string name="accessibility_service_description">Используется только по явной команде пользователя в Chrome на HTTPS-домене pocketoption.com. Сервис читает дерево страницы только после проверки адресной строки и подтверждения экрана Pocket Option; на других сайтах и в других приложениях чтение и нажатия не выполняются.</string>
     <string name="forecast_prediction_label">ПРОГНОЗ</string>
     <string name="forecast_buy">ПРОГНОЗ: ПОКУПКА</string>
     <string name="forecast_sell">ПРОГНОЗ: ПРОДАЖА</string>
@@ -252,7 +252,7 @@
     <string name="mode_manual">РУЧНАЯ ТОРГОВЛЯ</string>
     <string name="mode_auto">АВТОТОРГОВЛЯ</string>
     <string name="accessibility_setup_button">НАСТРОЙКИ ACCESSIBILITY</string>
-    <string name="accessibility_setup_description">Чтобы разрешить нажатие только при выполнении проверок, самостоятельно включите службу AutoScanner в настройках Accessibility и откройте нужный экран Pocket Option. Сервис не выполняет вход и блокирует действие, если интерфейс нельзя проверить.</string>
+    <string name="accessibility_setup_description">Чтобы разрешить нажатие только при выполнении проверок, самостоятельно включите службу AutoScanner в настройках Accessibility и откройте Pocket Option на HTTPS-домене pocketoption.com в Chrome. На других сайтах и в других приложениях чтение и нажатия не выполняются.</string>
     <string name="accessibility_settings_unavailable">НАСТРОЙКИ ACCESSIBILITY НЕДОСТУПНЫ</string>
     <string name="auto_initial_amount">НАЧАЛЬНАЯ СУММА</string>
     <string name="auto_current_amount">ТЕКУЩАЯ СУММА</string>

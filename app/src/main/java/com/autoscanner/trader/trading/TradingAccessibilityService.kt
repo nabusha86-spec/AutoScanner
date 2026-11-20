@@ -25,7 +25,9 @@ class TradingAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        foregroundPackage = event?.packageName?.toString()
+        foregroundPackage = event?.packageName
+            ?.toString()
+            ?.takeIf(PocketOptionAccessibilityScope::allowsPackage)
     }
 
     override fun onInterrupt() {
@@ -60,9 +62,9 @@ class TradingAccessibilityService : AccessibilityService() {
         attemptInProgress = true
         activeCommandId = command.id
         clickIssued = false
-        val root = activeWindowRoot()
+        val root = activePocketOptionRoot()
         if (root == null) {
-            finishAttempt(callback, impossible("Активное окно недоступно"))
+            finishAttempt(callback, impossible("Откройте Pocket Option в Chrome"))
             return
         }
 
@@ -74,10 +76,6 @@ class TradingAccessibilityService : AccessibilityService() {
         val texts = nodes.mapNotNull { it.text?.toString()?.takeIf(String::isNotBlank) }
         if (!texts.any { normalize(it).contains(POCKET_OPTION_BRAND) }) {
             finishAttempt(callback, impossible("На переднем плане не подтверждён экран Pocket Option"))
-            return
-        }
-        if (foregroundPackage == null || foregroundPackage == packageName) {
-            finishAttempt(callback, impossible("Торговое приложение не является активным окном"))
             return
         }
         if (!containsInstrument(texts, command.instrument)) {
@@ -114,9 +112,46 @@ class TradingAccessibilityService : AccessibilityService() {
                 return
             }
         }
-        val beforeTexts = texts.map(::normalize)
+        val clickRoot = activePocketOptionRoot()
+        val clickNodes = clickRoot?.let(::safeCollectNodes)
+        if (clickRoot == null || clickNodes == null || clickRoot.windowId != root.windowId) {
+            finishAttempt(callback, impossible("Окно Pocket Option изменилось перед нажатием"))
+            return
+        }
+        val clickTexts = clickNodes.mapNotNull { it.text?.toString()?.takeIf(String::isNotBlank) }
+        if (!clickTexts.any { normalize(it).contains(POCKET_OPTION_BRAND) } ||
+            !containsInstrument(clickTexts, command.instrument) ||
+            !containsPrice(clickTexts, command.price) ||
+            !containsAmount(clickNodes, command.amount) ||
+            !hasSelectedExpiration(clickNodes, command.expirationSeconds)
+        ) {
+            finishAttempt(callback, impossible("Проверяемые данные сделки изменились перед нажатием"))
+            return
+        }
+        val clickBuyButtons = findClickableButtons(clickNodes, BUY_LABELS)
+        val clickSellButtons = findClickableButtons(clickNodes, SELL_LABELS)
+        if (clickBuyButtons.size != 1 || clickSellButtons.size != 1 ||
+            overlaps(clickBuyButtons.singleOrNull()?.bounds, clickSellButtons.singleOrNull()?.bounds)
+        ) {
+            finishAttempt(callback, impossible("Кнопки BUY и SELL изменились перед нажатием"))
+            return
+        }
+        val clickTarget = when (command.direction) {
+            PredictionDirection.BUY -> clickBuyButtons.single()
+            PredictionDirection.SELL -> clickSellButtons.single()
+            PredictionDirection.NO_TRADE -> {
+                finishAttempt(callback, impossible("Направление сделки не определено"))
+                return
+            }
+        }
+        if (clickTarget.bounds != target.bounds) {
+            finishAttempt(callback, impossible("Кнопка сделки изменилась перед нажатием"))
+            return
+        }
+
+        val beforeTexts = clickTexts.map(::normalize)
         val clicked = try {
-            target.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            clickTarget.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         } catch (_: IllegalStateException) {
             false
         } catch (_: SecurityException) {
@@ -131,7 +166,7 @@ class TradingAccessibilityService : AccessibilityService() {
         clickIssued = true
 
         mainHandler.postDelayed({
-            val afterRoot = activeWindowRoot()
+            val afterRoot = activePocketOptionRoot()
             val afterNodes = afterRoot?.let(::safeCollectNodes)
             if (afterNodes == null) {
                 finishAttempt(
@@ -198,6 +233,34 @@ class TradingAccessibilityService : AccessibilityService() {
         null
     } catch (_: SecurityException) {
         null
+    }
+
+    private fun activePocketOptionRoot(): AccessibilityNodeInfo? {
+        val expectedPackage = foregroundPackage
+            ?.takeIf(PocketOptionAccessibilityScope::allowsPackage)
+            ?: return null
+        val root = activeWindowRoot() ?: return null
+        if (root.packageName?.toString() != expectedPackage || !hasPocketOptionAddress(root)) {
+            return null
+        }
+        return root
+    }
+
+    private fun hasPocketOptionAddress(root: AccessibilityNodeInfo): Boolean = try {
+        root.findAccessibilityNodeInfosByViewId(
+            PocketOptionAccessibilityScope.CHROME_ADDRESS_BAR_VIEW_ID,
+        ).orEmpty().any { addressNode ->
+            addressNode.packageName?.toString() == PocketOptionAccessibilityScope.CHROME_PACKAGE &&
+                sequenceOf(addressNode.text, addressNode.contentDescription)
+                    .filterNotNull()
+                    .any(PocketOptionAccessibilityScope::allowsAddress)
+        }
+    } catch (_: IllegalStateException) {
+        false
+    } catch (_: SecurityException) {
+        false
+    } catch (_: IllegalArgumentException) {
+        false
     }
 
     private fun safeCollectNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo>? = try {

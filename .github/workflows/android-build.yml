@@ -70,11 +70,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     env:
       ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
       ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
       ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+      ANDROID_RELEASE_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
 
     steps:
       - name: Check out repository
@@ -101,15 +104,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Run unit tests and lint
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug
+
       - name: Prepare release signing key
         run: |
           test -n "$ANDROID_RELEASE_KEYSTORE_BASE64" || { echo "Missing ANDROID_RELEASE_KEYSTORE_BASE64 secret"; exit 1; }
           test -n "$ANDROID_RELEASE_STORE_PASSWORD" || { echo "Missing ANDROID_RELEASE_STORE_PASSWORD secret"; exit 1; }
           test -n "$ANDROID_RELEASE_KEY_ALIAS" || { echo "Missing ANDROID_RELEASE_KEY_ALIAS secret"; exit 1; }
           test -n "$ANDROID_RELEASE_KEY_PASSWORD" || { echo "Missing ANDROID_RELEASE_KEY_PASSWORD secret"; exit 1; }
-          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/autoscanner-release.jks"
-          test -s "$RUNNER_TEMP/autoscanner-release.jks"
-          echo "ANDROID_RELEASE_STORE_FILE=$RUNNER_TEMP/autoscanner-release.jks" >> "$GITHUB_ENV"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/autoscanner-release.p12"
+          test -s "$RUNNER_TEMP/autoscanner-release.p12"
+          echo "ANDROID_RELEASE_STORE_FILE=$RUNNER_TEMP/autoscanner-release.p12" >> "$GITHUB_ENV"
 
       - name: Build release APK
         run: ./gradlew --no-daemon :app:assembleRelease
@@ -118,11 +124,29 @@ jobs:
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           test -s "$APK"
+          BADGING=$("${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK")
+          printf '%s\n' "$BADGING"
+          printf '%s\n' "$BADGING" | grep -q "^package: name='com.autoscanner.trader' versionCode='6' versionName='0.2.4'"
           if "${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK" | grep -q '^application-debuggable'; then
             echo "Release APK must not be debuggable"
             exit 1
           fi
+          unzip -t "$APK" >/dev/null
           "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          CERT_INFO=$("${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --print-certs "$APK")
+          printf '%s\n' "$CERT_INFO"
+          if printf '%s\n' "$CERT_INFO" | grep -q 'CN=Android Debug'; then
+            echo "Release APK must use a dedicated release signing key, not the Android debug key"
+            exit 1
+          fi
+          EXPECTED_CERT_SHA256="$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':')"
+          ACTUAL_CERT_SHA256="$(printf '%s\n' "$CERT_INFO" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr '[:upper:]' '[:lower:]' | tr -d ':')"
+          test -n "$EXPECTED_CERT_SHA256" || { echo "Missing ANDROID_RELEASE_CERT_SHA256 repository variable"; exit 1; }
+          test -n "$ACTUAL_CERT_SHA256" || { echo "Unable to read APK signing certificate fingerprint"; exit 1; }
+          if [ "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "Release APK certificate fingerprint does not match ANDROID_RELEASE_CERT_SHA256"
+            exit 1
+          fi
 
       - name: Upload signed release APK artifact
         uses: actions/upload-artifact@v4
@@ -131,3 +155,18 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$APK" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$APK" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AutoScanner Trader 0.2.4" \
+              --notes "Signed release APK. Package: com.autoscanner.trader; versionCode: 6; versionName: 0.2.4. The build verifies the pinned release certificate fingerprint."
+          fi
