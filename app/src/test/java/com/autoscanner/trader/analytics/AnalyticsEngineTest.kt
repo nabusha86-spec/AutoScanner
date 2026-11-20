@@ -41,7 +41,6 @@ class AnalyticsEngineTest {
         timer = "00:45",
         expiration = "00:45",
         chart = ChartAnalysis(true, 0, 0, 100, 100, candles, "НЕ ОПРЕДЕЛЕНО", null),
-        buttons = emptyList(),
         indicators = emptyList(),
         otherElements = emptyList(),
         textBoxes = emptyList(),

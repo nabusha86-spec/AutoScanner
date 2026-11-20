@@ -44,20 +44,6 @@ data class ChartAnalysis(
     val changedPercent: Double?,
 )
 
-data class TradingButton(
-    val kind: String,
-    val detected: Boolean,
-    val text: String,
-    val left: Int?,
-    val top: Int?,
-    val right: Int?,
-    val bottom: Int?,
-    val confidence: Float,
-    val state: String,
-    val ambiguous: Boolean,
-    val message: String,
-)
-
 data class FrameAnalysis(
     val sequence: Int,
     val timestampMillis: Long,
@@ -72,7 +58,6 @@ data class FrameAnalysis(
     val timer: String,
     val expiration: String,
     val chart: ChartAnalysis,
-    val buttons: List<TradingButton>,
     val indicators: List<String>,
     val otherElements: List<String>,
     val textBoxes: List<TextBox>,
@@ -91,8 +76,6 @@ data class AnalysisReport(
     val candles: List<Candle>,
     val marketMovement: String,
     val indicators: List<String>,
-    val buyButton: TradingButton,
-    val sellButton: TradingButton,
     val imageQuality: String,
     val warnings: List<String>,
     val errors: List<String>,

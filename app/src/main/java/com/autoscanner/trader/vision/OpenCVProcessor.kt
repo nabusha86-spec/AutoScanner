@@ -142,107 +142,6 @@ class OpenCVProcessor(private val strings: VisionStrings) {
         }
     }
 
-    fun detectButtonColorRegions(bitmap: Bitmap): List<ColorRegion> {
-        val rgba = Mat()
-        val hsv = Mat()
-        val green = Mat()
-        val redLow = Mat()
-        val redHigh = Mat()
-        val red = Mat()
-        val hierarchy = Mat()
-        val contours = ArrayList<MatOfPoint>()
-        try {
-            Utils.bitmapToMat(bitmap, rgba)
-            Imgproc.cvtColor(rgba, hsv, Imgproc.COLOR_RGBA2RGB)
-            Imgproc.cvtColor(hsv, hsv, Imgproc.COLOR_RGB2HSV)
-            Core.inRange(hsv, Scalar(35.0, 65.0, 60.0), Scalar(100.0, 255.0, 255.0), green)
-            Core.inRange(hsv, Scalar(0.0, 65.0, 60.0), Scalar(12.0, 255.0, 255.0), redLow)
-            Core.inRange(hsv, Scalar(168.0, 65.0, 60.0), Scalar(180.0, 255.0, 255.0), redHigh)
-            Core.bitwise_or(redLow, redHigh, red)
-
-            val search = Rect(0, 0, bitmap.width, bitmap.height)
-            val greenRegion = green.submat(search)
-            val redRegion = red.submat(search)
-            val combined = Mat()
-            try {
-                Core.bitwise_or(greenRegion, redRegion, combined)
-                Imgproc.findContours(
-                    combined,
-                    contours,
-                    hierarchy,
-                    Imgproc.RETR_EXTERNAL,
-                    Imgproc.CHAIN_APPROX_SIMPLE,
-                )
-                return contours.mapNotNull { contour ->
-                    val bounds = Imgproc.boundingRect(contour)
-                    val width = bounds.width
-                    val height = bounds.height
-                    val centerX = bounds.x + width / 2
-                    val centerY = bounds.y + height / 2
-                    val inButtonZone = centerX >= bitmap.width * RIGHT_PANEL_START ||
-                        centerY >= bitmap.height * BOTTOM_BUTTONS_START
-                    if (!inButtonZone ||
-                        width < bitmap.width * MIN_BUTTON_WIDTH_RATIO ||
-                        height < bitmap.height * MIN_BUTTON_HEIGHT_RATIO ||
-                        width > bitmap.width * MAX_BUTTON_WIDTH_RATIO ||
-                        height > bitmap.height * MAX_BUTTON_HEIGHT_RATIO ||
-                        bounds.area() < bitmap.width.toDouble() * bitmap.height * MIN_BUTTON_AREA_RATIO ||
-                        width.toFloat() / height !in MIN_BUTTON_ASPECT..MAX_BUTTON_ASPECT
-                    ) {
-                        null
-                    } else {
-                        val greenCrop = greenRegion.submat(bounds)
-                        val redCrop = redRegion.submat(bounds)
-                        val greenPixels: Int
-                        val redPixels: Int
-                        try {
-                            greenPixels = Core.countNonZero(greenCrop)
-                            redPixels = Core.countNonZero(redCrop)
-                        } finally {
-                            greenCrop.release()
-                            redCrop.release()
-                        }
-                        val total = bounds.area().toDouble().coerceAtLeast(1.0)
-                        when {
-                            greenPixels / total >= MIN_BUTTON_COLOR_FRACTION &&
-                                greenPixels > redPixels -> ColorRegion(
-                                strings.green,
-                                bounds.x,
-                                bounds.y,
-                                bounds.x + width,
-                                bounds.y + height,
-                                (greenPixels / total).toFloat(),
-                            )
-                            redPixels / total >= MIN_BUTTON_COLOR_FRACTION &&
-                                redPixels > greenPixels -> ColorRegion(
-                                strings.red,
-                                bounds.x,
-                                bounds.y,
-                                bounds.x + width,
-                                bounds.y + height,
-                                (redPixels / total).toFloat(),
-                            )
-                            else -> null
-                        }
-                    }
-                }
-            } finally {
-                combined.release()
-                greenRegion.release()
-                redRegion.release()
-            }
-        } finally {
-            rgba.release()
-            hsv.release()
-            green.release()
-            redLow.release()
-            redHigh.release()
-            red.release()
-            hierarchy.release()
-            contours.forEach(Mat::release)
-        }
-    }
-
     fun compare(previous: Bitmap, current: Bitmap): Double {
         val width = minOf(previous.width, current.width)
         val height = minOf(previous.height, current.height)
@@ -318,15 +217,6 @@ class OpenCVProcessor(private val strings: VisionStrings) {
         }
     }
 
-    data class ColorRegion(
-        val color: String,
-        val left: Int,
-        val top: Int,
-        val right: Int,
-        val bottom: Int,
-        val colorFraction: Float,
-    )
-
     private data class Candidate(
         val bounds: Rect,
         val color: String,
@@ -339,8 +229,6 @@ class OpenCVProcessor(private val strings: VisionStrings) {
         private const val CHART_TOP = 0.10f
         private const val CHART_RIGHT = 0.82f
         private const val CHART_BOTTOM = 0.82f
-        private const val RIGHT_PANEL_START = 0.64f
-        private const val BOTTOM_BUTTONS_START = 0.68f
         private const val MIN_CANDLE_WIDTH = 2
         private const val MAX_CANDLE_WIDTH = 22
         private const val MIN_CANDLE_HEIGHT = 5
@@ -349,14 +237,6 @@ class OpenCVProcessor(private val strings: VisionStrings) {
         private const val MIN_CANDLE_COLOR_PIXELS = 8
         private const val MIN_CANDLES_FOR_CHART = 3
         private const val BODY_ROW_FRACTION = 0.35
-        private const val MIN_BUTTON_WIDTH_RATIO = 0.055f
-        private const val MIN_BUTTON_HEIGHT_RATIO = 0.022f
-        private const val MAX_BUTTON_WIDTH_RATIO = 0.33f
-        private const val MAX_BUTTON_HEIGHT_RATIO = 0.16f
-        private const val MIN_BUTTON_AREA_RATIO = 0.0014f
-        private const val MIN_BUTTON_ASPECT = 0.70f
-        private const val MAX_BUTTON_ASPECT = 5.0f
-        private const val MIN_BUTTON_COLOR_FRACTION = 0.25
         private const val CHANGE_THRESHOLD = 22.0
     }
 }

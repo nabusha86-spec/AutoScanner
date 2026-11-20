@@ -9,13 +9,11 @@ class PocketOptionScreenDetector(
         price: String,
         timeframe: String,
         timer: String,
-        buttons: List<TradingButton>,
     ): Boolean {
         if (!chart.detected || chart.candles.size < MIN_CHART_CANDLES) return false
-        val recognizedButton = buttons.any { it.detected && !it.ambiguous }
         val structuredMarketData = instrument != strings.unknown &&
             (price != strings.unknown || timeframe != strings.unknown || timer != strings.unknown)
-        return recognizedButton && (structuredMarketData || buttons.count { it.detected } == 2)
+        return structuredMarketData
     }
 
     private companion object {

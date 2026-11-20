@@ -51,11 +51,9 @@ class ScreenCaptureService : Service() {
     private var sampleCount = 0
     private var lastSampleTimeMs = 0L
     private var captureStartedAtMs = 0L
-    private var continuousSession = false
     @Volatile private var cycleActive = false
     @Volatile private var sessionEnded = false
     private var singleFrameCapture = false
-    private var automaticCaptureActive = false
     private var captureTimeout: Runnable? = null
     private var captureStartFrameCallback: Choreographer.FrameCallback? = null
     @Volatile private var captureNotBeforeNanos = 0L
@@ -70,6 +68,7 @@ class ScreenCaptureService : Service() {
     private var overlayBubble: Button? = null
     private var overlayStatus: TextView? = null
     private var overlayResult: TextView? = null
+    private var overlayManualConfirmation: Button? = null
     private var overlayThumbnail: ImageView? = null
     private var lastThumbnail: Bitmap? = null
     private var overlayLayoutParams: WindowManager.LayoutParams? = null
@@ -120,7 +119,7 @@ class ScreenCaptureService : Service() {
         }
 
         when (intent?.action) {
-            ACTION_CAPTURE_SINGLE, ACTION_START_NEXT_CYCLE -> {
+            ACTION_CAPTURE_SINGLE -> {
                 if (projection == null) {
                     sendCaptureResult(succeeded = false, errorResource = R.string.capture_session_inactive)
                     sessionEnded = true
@@ -128,12 +127,7 @@ class ScreenCaptureService : Service() {
                 } else if (capturePreparing || cycleActive || analysisPending) {
                     Log.i(TAG, "Ignoring duplicate capture request while a cycle is active")
                 } else {
-                    val automatic = intent.action == ACTION_START_NEXT_CYCLE
-                    if (automatic) continuousSession = true
-                    startCaptureWindow(
-                        singleFrame = !automatic,
-                        automatic = automatic,
-                    )
+                    startCaptureWindow(singleFrame = true)
                 }
                 return START_NOT_STICKY
             }
@@ -167,26 +161,6 @@ class ScreenCaptureService : Service() {
                 }
                 return START_NOT_STICKY
             }
-            ACTION_STOP_AUTO -> {
-                if (projection == null) {
-                    setOverlayVisible(true)
-                    return START_NOT_STICKY
-                }
-                analysisPending = false
-                if (automaticCaptureActive && (capturePreparing || cycleActive)) {
-                    cancelCaptureCycle()
-                    captureDirectory?.deleteRecursively()
-                    recordingEnabled = false
-                    sendBroadcast(
-                        Intent(ACTION_RECORDING_STATE)
-                            .setPackage(packageName)
-                            .putExtra(EXTRA_RECORDING_ENABLED, false),
-                    )
-                }
-                setOverlayVisible(true)
-                updateOverlayStatus(getString(R.string.auto_status_stopped))
-                return START_NOT_STICKY
-            }
             ACTION_SHOW_RESULT -> {
                 analysisPending = false
                 analysisTimeout?.let(mainHandler::removeCallbacks)
@@ -194,6 +168,14 @@ class ScreenCaptureService : Service() {
                 val result = intent.getStringExtra(EXTRA_RESULT_TEXT)
                 if (!result.isNullOrBlank()) {
                     overlayResult?.text = result
+                    overlayManualConfirmation?.apply {
+                        visibility = if (intent.getBooleanExtra(EXTRA_HAS_SIGNAL, false)) {
+                            View.VISIBLE
+                        } else {
+                            View.GONE
+                        }
+                        isEnabled = true
+                    }
                     if (intent.hasExtra(EXTRA_RESULT_IMAGE)) {
                         updateOverlayThumbnailText(intent.getStringExtra(EXTRA_RESULT_IMAGE))
                     }
@@ -209,6 +191,10 @@ class ScreenCaptureService : Service() {
                 val message = intent.getStringExtra(EXTRA_RESULT_TEXT)
                     ?: getString(R.string.analysis_failed)
                 overlayResult?.text = message
+                overlayManualConfirmation?.apply {
+                    visibility = View.GONE
+                    isEnabled = true
+                }
                 updateOverlayStatus(message)
                 setOverlayVisible(true)
                 return START_NOT_STICKY
@@ -228,7 +214,6 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        continuousSession = intent.getBooleanExtra(EXTRA_CONTINUOUS_SESSION, false)
         try {
             startCaptureForeground()
             sessionInitializationPending = true
@@ -289,10 +274,7 @@ class ScreenCaptureService : Service() {
         )
     }
 
-    private fun startCaptureWindow(
-        singleFrame: Boolean,
-        automatic: Boolean = false,
-    ) {
+    private fun startCaptureWindow(singleFrame: Boolean) {
         if (sessionEnded || projection == null || virtualDisplay == null) return
         if (capturePreparing || cycleActive || analysisPending) {
             sendCaptureResult(succeeded = false, errorResource = R.string.capture_busy)
@@ -312,7 +294,10 @@ class ScreenCaptureService : Service() {
             lastSampleTimeMs = 0L
             captureStartedAtMs = 0L
             singleFrameCapture = singleFrame
-            automaticCaptureActive = automatic
+            overlayManualConfirmation?.apply {
+                visibility = View.GONE
+                isEnabled = true
+            }
             cycleActive = false
             setOverlayVisible(false)
             updateOverlayStatus(getString(R.string.capture_getting_frame))
@@ -366,7 +351,6 @@ class ScreenCaptureService : Service() {
         captureTimeout = null
         capturePreparing = false
         cycleActive = false
-        automaticCaptureActive = false
         captureNotBeforeNanos = Long.MAX_VALUE
     }
 
@@ -472,7 +456,6 @@ class ScreenCaptureService : Service() {
     private fun finishCaptureCycle() {
         if (sessionEnded || !cycleActive) return
         cycleActive = false
-        automaticCaptureActive = false
         captureTimeout?.let { handler?.removeCallbacks(it) }
         captureTimeout = null
         if (recordingEnabled) {
@@ -490,6 +473,7 @@ class ScreenCaptureService : Service() {
             analysisPending = false
             val message = getString(R.string.analysis_failed)
             overlayResult?.text = message
+            overlayManualConfirmation?.visibility = View.GONE
             updateOverlayStatus(message)
             setOverlayVisible(true)
         }.also { mainHandler.postDelayed(it, ANALYSIS_TIMEOUT_MS) }
@@ -507,8 +491,7 @@ class ScreenCaptureService : Service() {
                 .putExtra(EXTRA_ERROR_RESOURCE, errorResource ?: 0)
                 .putExtra(EXTRA_CAPTURE_DIRECTORY, captureDirectory?.absolutePath)
                 .putExtra(EXTRA_CAPTURE_STARTED_AT, captureStartedAtMs)
-                .putExtra(EXTRA_CAPTURE_DURATION, CAPTURE_DURATION_MS)
-                .putExtra(EXTRA_CONTINUOUS_SESSION, continuousSession),
+                .putExtra(EXTRA_CAPTURE_DURATION, CAPTURE_DURATION_MS),
         )
     }
 
@@ -715,14 +698,6 @@ class ScreenCaptureService : Service() {
         }
         panel.addView(overlayThumbnail)
         panel.addView(buttonRow(
-            overlayButton(R.string.mode_manual) {
-                sendOverlayCommand(ACTION_OVERLAY_MANUAL)
-            },
-            overlayButton(R.string.mode_auto) {
-                sendOverlayCommand(ACTION_OVERLAY_AUTO)
-            },
-        ))
-        panel.addView(buttonRow(
             overlayButton(R.string.manual_scan_button) {
                 startService(Intent(this, ScreenCaptureService::class.java).setAction(ACTION_CAPTURE_SINGLE))
             },
@@ -730,11 +705,14 @@ class ScreenCaptureService : Service() {
                 startService(Intent(this, ScreenCaptureService::class.java).setAction(ACTION_TOGGLE_RECORDING))
             },
         ))
+        overlayManualConfirmation = overlayButton(R.string.manual_confirmation_button) {
+            overlayResult?.text = getString(R.string.manual_confirmation_result)
+            overlayManualConfirmation?.isEnabled = false
+        }.apply {
+            visibility = View.GONE
+        }
+        panel.addView(overlayManualConfirmation)
         panel.addView(buttonRow(
-            overlayButton(R.string.auto_stop_button) {
-                startService(Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP_AUTO))
-                sendOverlayCommand(ACTION_OVERLAY_STOP_AUTO)
-            },
             overlayButton(R.string.overlay_collapse) { setOverlayCollapsed(true) },
         ))
 
@@ -795,10 +773,6 @@ class ScreenCaptureService : Service() {
             }
             setOnClickListener { click() }
         }
-
-    private fun sendOverlayCommand(action: String) {
-        sendBroadcast(Intent(action).setPackage(packageName))
-    }
 
     private fun setOverlayCollapsed(collapsed: Boolean) {
         overlayContent?.visibility = if (collapsed) View.GONE else View.VISIBLE
@@ -940,6 +914,7 @@ class ScreenCaptureService : Service() {
         overlayBubble = null
         overlayStatus = null
         overlayResult = null
+        overlayManualConfirmation = null
         overlayThumbnail = null
         lastThumbnail?.recycle()
         lastThumbnail = null
@@ -1005,27 +980,22 @@ class ScreenCaptureService : Service() {
     companion object {
         private const val TAG = "ScreenCaptureService"
         const val ACTION_CAPTURE_COMPLETE = "com.autoscanner.trader.CAPTURE_COMPLETE"
-        const val ACTION_START_NEXT_CYCLE = "com.autoscanner.trader.START_NEXT_CAPTURE_CYCLE"
         const val ACTION_STOP_SESSION = "com.autoscanner.trader.STOP_CAPTURE_SESSION"
         const val ACTION_CAPTURE_SINGLE = "com.autoscanner.trader.CAPTURE_SINGLE_FRAME"
         const val ACTION_START_SESSION = "com.autoscanner.trader.START_CAPTURE_SESSION"
         const val ACTION_QUERY_STATE = "com.autoscanner.trader.QUERY_CAPTURE_STATE"
         const val ACTION_TOGGLE_RECORDING = "com.autoscanner.trader.TOGGLE_RECORDING"
-        const val ACTION_STOP_AUTO = "com.autoscanner.trader.STOP_AUTO_ANALYSIS"
         const val ACTION_SHOW_RESULT = "com.autoscanner.trader.SHOW_ANALYSIS_RESULT"
         const val ACTION_SHOW_ERROR = "com.autoscanner.trader.SHOW_ANALYSIS_ERROR"
         const val ACTION_SESSION_READY = "com.autoscanner.trader.CAPTURE_SESSION_READY"
         const val ACTION_RECORDING_STATE = "com.autoscanner.trader.RECORDING_STATE"
-        const val ACTION_OVERLAY_MANUAL = "com.autoscanner.trader.OVERLAY_MANUAL"
-        const val ACTION_OVERLAY_AUTO = "com.autoscanner.trader.OVERLAY_AUTO"
-        const val ACTION_OVERLAY_STOP_AUTO = "com.autoscanner.trader.OVERLAY_STOP_AUTO"
         const val EXTRA_RESULT_TEXT = "analysis_result_text"
         const val EXTRA_RESULT_IMAGE = "analysis_result_image"
+        const val EXTRA_HAS_SIGNAL = "analysis_has_directional_signal"
         const val EXTRA_KEEP_HIDDEN = "keep_overlay_hidden"
         const val EXTRA_RECORDING_ENABLED = "recording_enabled"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
-        const val EXTRA_CONTINUOUS_SESSION = "continuous_session"
         const val EXTRA_SUCCEEDED = "capture_succeeded"
         const val EXTRA_FRAMES = "captured_frames"
         const val EXTRA_ERROR_RESOURCE = "capture_error_resource"

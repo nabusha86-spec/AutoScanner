@@ -42,7 +42,6 @@ class FrameProcessingEngine(context: Context) {
         }
         val openCvProcessor = if (openCvAvailable) OpenCVProcessor(strings) else null
         val qualityAnalyzer = if (openCvAvailable) ImageQualityAnalyzer(strings) else null
-        val buttonRecognizer = openCvProcessor?.let { TradingButtonsRecognitionEngine(it, strings) }
         val interfaceRecognizer = TradingInterfaceRecognitionEngine(strings)
         val frames = ArrayList<FrameAnalysis>(frameFiles.size)
         var ocrProcessor: OCRProcessor? = null
@@ -128,24 +127,10 @@ class FrameProcessingEngine(context: Context) {
                         unavailableChart()
                     }
                     coroutineContext.ensureActive()
-                    val buttons = if (buttonRecognizer != null) {
-                        try {
-                            buttonRecognizer.recognize(bitmap, textBoxes)
-                        } catch (_: RuntimeException) {
-                            frameErrors += strings.get(R.string.vision_error_buttons)
-                            unavailableButtons()
-                        } catch (_: UnsatisfiedLinkError) {
-                            frameErrors += strings.get(R.string.vision_error_buttons_native)
-                            unavailableButtons()
-                        }
-                    } else {
-                        unavailableButtons()
-                    }
                     val interfaceResult = try {
                         interfaceRecognizer.recognize(
                             textBoxes = textBoxes,
                             chart = chart,
-                            buttons = buttons,
                             width = bitmap.width,
                             height = bitmap.height,
                         )
@@ -187,7 +172,6 @@ class FrameProcessingEngine(context: Context) {
                         timer = interfaceResult.timer,
                         expiration = interfaceResult.expiration,
                         chart = frameChart,
-                        buttons = buttons,
                         indicators = interfaceResult.indicators,
                         otherElements = interfaceResult.otherElements,
                         textBoxes = textBoxes,
@@ -236,8 +220,6 @@ class FrameProcessingEngine(context: Context) {
             qualityCount == 0 -> strings.get(R.string.vision_quality_none, frames.size)
             else -> strings.get(R.string.vision_quality_partial, qualityCount, frames.size)
         }
-        val buy = bestButton(frames, strings.buy)
-        val sell = bestButton(frames, strings.sell)
         val warnings = buildList {
             if (detectedFrames == 0) {
                 add(strings.get(R.string.vision_warning_interface_none))
@@ -269,8 +251,6 @@ class FrameProcessingEngine(context: Context) {
             candles = candles,
             marketMovement = detectSequenceMovement(frames, strings),
             indicators = frames.flatMap { it.indicators }.distinct(),
-            buyButton = buy,
-            sellButton = sell,
             imageQuality = qualitySummary,
             warnings = warnings,
             errors = allErrors,
@@ -364,29 +344,6 @@ class FrameProcessingEngine(context: Context) {
         }
     }
 
-    private fun bestButton(frames: List<FrameAnalysis>, kind: String): TradingButton =
-        frames.asSequence()
-            .flatMap { it.buttons.asSequence() }
-            .filter { it.kind == kind }
-            .filter { it.detected && !it.ambiguous }
-            .maxByOrNull { it.confidence }
-            ?: frames.asSequence()
-                .flatMap { it.buttons.asSequence() }
-                .lastOrNull { it.kind == kind }
-            ?: TradingButton(
-                kind = kind,
-                detected = false,
-                text = strings.unknown,
-                left = null,
-                top = null,
-                right = null,
-                bottom = null,
-                confidence = 0f,
-                state = strings.unknown,
-                ambiguous = false,
-                message = strings.get(R.string.vision_button_not_recognized),
-            )
-
     private fun persistReport(report: AnalysisReport, directory: File) {
         val root = JSONObject()
             .put("processedFrames", report.processedFrames)
@@ -402,8 +359,6 @@ class FrameProcessingEngine(context: Context) {
             .put("imageQuality", report.imageQuality)
             .put("warnings", JSONArray(report.warnings))
             .put("errors", JSONArray(report.errors))
-            .put("buyButton", buttonJson(report.buyButton))
-            .put("sellButton", buttonJson(report.sellButton))
             .put("prediction", report.prediction?.let { prediction ->
                 JSONObject()
                     .put("direction", prediction.direction.name)
@@ -484,9 +439,6 @@ class FrameProcessingEngine(context: Context) {
             .put("candles", JSONArray().apply {
                 frame.chart.candles.forEach { candle -> put(candleJson(candle)) }
             }))
-        .put("buttons", JSONArray().apply {
-            frame.buttons.forEach { button -> put(buttonJson(button)) }
-        })
         .put("indicators", JSONArray(frame.indicators))
         .put("otherElements", JSONArray(frame.otherElements))
         .put("textBoxes", JSONArray().apply {
@@ -501,19 +453,6 @@ class FrameProcessingEngine(context: Context) {
             }
         })
         .put("errors", JSONArray(frame.errors))
-
-    private fun buttonJson(button: TradingButton): JSONObject = JSONObject()
-        .put("kind", button.kind)
-        .put("detected", button.detected)
-        .put("text", button.text)
-        .put("left", button.left ?: JSONObject.NULL)
-        .put("top", button.top ?: JSONObject.NULL)
-        .put("right", button.right ?: JSONObject.NULL)
-        .put("bottom", button.bottom ?: JSONObject.NULL)
-        .put("confidence", button.confidence)
-        .put("state", button.state)
-        .put("ambiguous", button.ambiguous)
-        .put("message", button.message)
 
     private fun candleJson(candle: Candle): JSONObject = JSONObject()
         .put("index", candle.index)
@@ -548,7 +487,6 @@ class FrameProcessingEngine(context: Context) {
         timer = strings.unknown,
         expiration = strings.unknown,
         chart = unavailableChart(),
-        buttons = unavailableButtons(),
         indicators = emptyList(),
         otherElements = emptyList(),
         textBoxes = emptyList(),
@@ -576,22 +514,6 @@ class FrameProcessingEngine(context: Context) {
         movement = strings.get(R.string.vision_chart_undetermined),
         changedPercent = null,
     )
-
-    private fun unavailableButtons() = listOf(strings.buy, strings.sell).map { kind ->
-        TradingButton(
-            kind = kind,
-            detected = false,
-            text = strings.unknown,
-            left = null,
-            top = null,
-            right = null,
-            bottom = null,
-            confidence = 0f,
-            state = strings.unknown,
-            ambiguous = false,
-            message = strings.get(R.string.vision_button_recognition_unavailable),
-        )
-    }
 
     companion object {
         private const val REPORT_FILE_NAME = "analysis.json"

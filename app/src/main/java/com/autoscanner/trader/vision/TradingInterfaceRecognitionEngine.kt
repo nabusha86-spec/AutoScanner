@@ -10,7 +10,6 @@ class TradingInterfaceRecognitionEngine(
     fun recognize(
         textBoxes: List<TextBox>,
         chart: ChartAnalysis,
-        buttons: List<TradingButton>,
         width: Int,
         height: Int,
     ): InterfaceResult {
@@ -92,7 +91,7 @@ class TradingInterfaceRecognitionEngine(
             .take(MAX_OTHER_ELEMENTS)
             .map { it.text }
             .distinct()
-        val tradingScreen = screenDetector.detect(chart, instrument, price, timeframe, timer, buttons)
+        val tradingScreen = screenDetector.detect(chart, instrument, price, timeframe, timer)
 
         return InterfaceResult(
             tradingScreenDetected = tradingScreen,
