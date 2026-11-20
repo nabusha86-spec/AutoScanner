@@ -132,6 +132,8 @@ class MainActivity : ComponentActivity() {
                 R.string.capture_error
             }
             if (!succeeded) {
+                analysisReport = null
+                analysisError = null
                 val errorResource = intent.getIntExtra(
                     ScreenCaptureService.EXTRA_ERROR_RESOURCE,
                     R.string.capture_failed,
@@ -149,6 +151,7 @@ class MainActivity : ComponentActivity() {
                 autoTradingController.onCaptureFailed(getString(
                     errorResource,
                 ))
+                showOverlayError(getString(errorResource))
             }
             if (succeeded) {
                 analysisReport = null
@@ -186,6 +189,9 @@ class MainActivity : ComponentActivity() {
                                 autoTradingController.onCaptureFailed(getString(R.string.analysis_processing_error))
                             }
                         } catch (error: CancellationException) {
+                            if (!isFinishing) {
+                                showOverlayError(getString(R.string.analysis_cancelled))
+                            }
                             throw error
                         } catch (error: RuntimeException) {
                             Log.e(TAG, "Frame sequence analysis failed", error)
@@ -432,6 +438,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleRecording() {
+        if (captureRunning || analysisRunning) return
         if (!captureSessionActive) {
             requestCapture()
             return
@@ -441,7 +448,6 @@ class MainActivity : ComponentActivity() {
                 Intent(this, ScreenCaptureService::class.java)
                     .setAction(ScreenCaptureService.ACTION_TOGGLE_RECORDING),
             )
-            recordingEnabled = !recordingEnabled
         } catch (_: SecurityException) {
             captureStatus = R.string.capture_permission_error
         } catch (_: IllegalStateException) {
@@ -606,7 +612,7 @@ class MainActivity : ComponentActivity() {
                 .setAction(ScreenCaptureService.ACTION_SHOW_RESULT)
                 .putExtra(ScreenCaptureService.EXTRA_RESULT_TEXT, resultText)
                 .putExtra(ScreenCaptureService.EXTRA_RESULT_IMAGE, imagePath)
-                .putExtra(ScreenCaptureService.EXTRA_KEEP_HIDDEN, autoTradingState.running),
+                .putExtra(ScreenCaptureService.EXTRA_KEEP_HIDDEN, false),
         )
     }
 

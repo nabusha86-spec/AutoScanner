@@ -651,6 +651,11 @@ class AutoTradingController(
             running = false,
             status = AutoTradingStatus.ERROR,
             captureState = "ОШИБКА ЗАХВАТА",
+            instrument = "НЕ ОПРЕДЕЛЕНО",
+            currentPrice = "НЕ ОПРЕДЕЛЕНО",
+            forecast = PredictionDirection.NO_TRADE,
+            confidence = 0.0,
+            expirationSeconds = null,
             lastSkipReason = resourceMessage,
         ))
     }

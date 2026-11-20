@@ -44,6 +44,7 @@
     <string name="analysis_processing_frames">РАСПОЗНАВАНИЕ ТЕКСТА И АНАЛИЗ КАЖДОГО КАДРА…</string>
     <string name="analysis_complete">ОБРАБОТКА ПОСЛЕДОВАТЕЛЬНОСТИ ЗАВЕРШЕНА</string>
     <string name="analysis_failed">НЕ УДАЛОСЬ ЗАВЕРШИТЬ АНАЛИЗ</string>
+    <string name="analysis_cancelled">АНАЛИЗ ОТМЕНЁН; ЗАХВАТ ЗАВЕРШЁН</string>
     <string name="analysis_directory_missing">СЛУЖБА ЗАХВАТА НЕ ПЕРЕДАЛА КАТАЛОГ КАДРОВ</string>
     <string name="analysis_processing_error">ПРОВЕРЬТЕ СОХРАННОСТЬ КАДРОВ И ДОСТУПНОСТЬ МОДЕЛЕЙ РАСПОЗНАВАНИЯ</string>
     <string name="analysis_error_details">ПРИЧИНА: %1$s</string>
