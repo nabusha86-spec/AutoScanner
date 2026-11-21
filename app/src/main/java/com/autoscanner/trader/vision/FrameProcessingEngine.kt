@@ -286,7 +286,13 @@ class FrameProcessingEngine(context: Context) {
             reportPath = File(directory, REPORT_FILE_NAME).absolutePath,
             prediction = null,
         )
-        val prediction = AnalyticsCoordinator().analyze(
+        val minimumConfidence = appContext.getSharedPreferences(
+            "autoscanner_settings",
+            android.content.Context.MODE_PRIVATE,
+        ).getFloat("minimum_confidence", 0.68f).toDouble().coerceIn(0.50, 0.95)
+        val prediction = AnalyticsCoordinator(
+            minimumConfidence = minimumConfidence,
+        ).analyze(
             frames = frames,
             instrument = baseReport.instrument,
             price = baseReport.price,

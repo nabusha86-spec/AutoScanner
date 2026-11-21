@@ -370,64 +370,26 @@ class MainActivity : ComponentActivity() {
         val hasSignal = prediction?.direction == PredictionDirection.BUY ||
             prediction?.direction == PredictionDirection.SELL
         val direction = when (prediction?.direction) {
-            PredictionDirection.BUY -> getString(R.string.overlay_direction_up)
-            PredictionDirection.SELL -> getString(R.string.overlay_direction_down)
-            PredictionDirection.NO_TRADE, null -> getString(R.string.overlay_no_signal)
+            PredictionDirection.BUY -> "BUY"
+            PredictionDirection.SELL -> "SELL"
+            else -> "NONE"
         }
-        val confidence = prediction
-            ?.let { getString(R.string.forecast_confidence_inline, (it.confidence * 100).toInt()) }
-            ?: getString(R.string.forecast_confidence_undefined)
-        val upScore = prediction?.upScorePercent
-            ?.let { getString(R.string.overlay_score_percent, it) }
-            ?: getString(R.string.undetermined)
-        val downScore = prediction?.downScorePercent
-            ?.let { getString(R.string.overlay_score_percent, it) }
-            ?: getString(R.string.undetermined)
-        val engines = prediction?.engineAssessments.orEmpty()
-        val failedEngines = engines.filterNot { it.successful }
-        val engineSummary = getString(
-            R.string.overlay_engine_summary,
-            engines.count { it.successful },
-            engines.size,
-        )
-        val reasons = prediction?.reasons.orEmpty().take(2)
-        val explanation = reasons.ifEmpty { listOf(report.marketMovement) }
-            .joinToString("\n") { getString(R.string.analysis_list_item, it) }
-        val insufficientData = prediction?.direction == PredictionDirection.NO_TRADE
-        val warning = buildList {
-            if (insufficientData) add(getString(R.string.overlay_insufficient_data))
-            if (failedEngines.isNotEmpty()) {
-                add(getString(
-                    R.string.overlay_failed_engines,
-                    failedEngines.joinToString { it.name },
-                ))
-            }
-            val directions = engines.filter {
-                    it.successful && it.direction != com.autoscanner.trader.analytics.DirectionInfluence.NEUTRAL
-                }.map { it.direction }.distinct()
-            if (directions.size > 1) add(getString(R.string.overlay_engine_conflict))
-        }.takeIf { it.isNotEmpty() }?.joinToString("\n")
-        val resultText = listOf(
-            getString(R.string.screenshot_received_at, java.text.SimpleDateFormat(
-                "HH:mm:ss",
-                java.util.Locale.getDefault(),
-            ).format(java.util.Date(captureTimestamp))),
-            getString(R.string.screenshot_analyzed),
-            direction,
-            getString(R.string.overlay_score_up, upScore),
-            getString(R.string.overlay_score_down, downScore),
-            getString(R.string.overlay_confidence_inline, confidence),
-            engineSummary,
-            explanation,
-            warning,
-            getString(R.string.manual_execution_only),
-        ).filterNotNull().joinToString("\n")
+        val confidence = ((prediction?.confidence ?: 0.0) * 100.0)
+            .toInt()
+            .coerceIn(0, 100)
+        val movement = ((prediction?.momentumStrength
+            ?: prediction?.trendStrength
+            ?: 0.0) * 100.0)
+            .toInt()
+            .coerceIn(0, 100)
         startService(
             Intent(this, ScreenCaptureService::class.java)
                 .setAction(ScreenCaptureService.ACTION_SHOW_RESULT)
-                .putExtra(ScreenCaptureService.EXTRA_RESULT_TEXT, resultText)
                 .putExtra(ScreenCaptureService.EXTRA_RESULT_IMAGE, imagePath)
                 .putExtra(ScreenCaptureService.EXTRA_HAS_SIGNAL, hasSignal)
+                .putExtra(ScreenCaptureService.EXTRA_DIRECTION, direction)
+                .putExtra(ScreenCaptureService.EXTRA_CONFIDENCE, confidence)
+                .putExtra(ScreenCaptureService.EXTRA_MOVEMENT, movement)
                 .putExtra(ScreenCaptureService.EXTRA_KEEP_HIDDEN, false),
         )
     }

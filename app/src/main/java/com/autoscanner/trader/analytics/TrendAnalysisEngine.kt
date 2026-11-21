@@ -23,17 +23,22 @@ class TrendAnalysisEngine {
         val moveRatio = if (spread > 0.0) kotlin.math.abs(last - first) / spread else 0.0
         val upRatio = (risingHighs + risingLows).toDouble() / ((highs.size - 1 + lows.size - 1).coerceAtLeast(1))
         val downRatio = (fallingHighs + fallingLows).toDouble() / ((highs.size - 1 + lows.size - 1).coerceAtLeast(1))
-        val recent = closes.takeLast(3)
-        val reversal = if (recent.size == 3) {
-            (recent[0] > recent[1] && recent[1] < recent[2]) ||
-                (recent[0] < recent[1] && recent[1] > recent[2])
+        val recent = closes.takeLast(5)
+        val recentMove = if (recent.size >= 2) {
+            (recent.last() - recent.first()) / (spread.coerceAtLeast(0.0000001))
+        } else 0.0
+        val reversal = if (recent.size >= 3) {
+            val firstDirection = recent[1] - recent[0]
+            val lastDirection = recent.last() - recent[recent.size - 2]
+            (firstDirection > 0.0 && lastDirection < 0.0) ||
+                (firstDirection < 0.0 && lastDirection > 0.0)
         } else false
         val direction = when {
             moveRatio < 0.35 && kotlin.math.abs(upRatio - downRatio) <= 0.22 ->
                 TrendDirection.SIDEWAYS
             reversal && moveRatio < 0.35 -> TrendDirection.POSSIBLE_REVERSAL
-            upRatio >= 0.58 && last >= first -> TrendDirection.UP
-            downRatio >= 0.58 && last <= first -> TrendDirection.DOWN
+            (upRatio >= 0.58 || recentMove > 0.18) && last >= first -> TrendDirection.UP
+            (downRatio >= 0.58 || recentMove < -0.18) && last <= first -> TrendDirection.DOWN
             kotlin.math.abs(upRatio - downRatio) <= 0.18 -> TrendDirection.SIDEWAYS
             else -> TrendDirection.UNCONFIRMED
         }

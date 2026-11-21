@@ -198,30 +198,50 @@ class ScreenCaptureService : Service() {
                 analysisPending = false
                 analysisTimeout?.let(mainHandler::removeCallbacks)
                 analysisTimeout = null
-                if (recordingEnabled && !sessionEnded) startCaptureWindow(singleFrame = false)
+                recordingEnabled = false
+                sendRecordingState()
+                updateOverlayControls()
                 return START_NOT_STICKY
             }
             ACTION_SHOW_RESULT -> {
                 analysisPending = false
                 analysisTimeout?.let(mainHandler::removeCallbacks)
                 analysisTimeout = null
-                val result = intent.getStringExtra(EXTRA_RESULT_TEXT)
-                if (!result.isNullOrBlank()) {
-                    overlayResult?.text = result
-                    overlayManualConfirmation?.apply {
-                        visibility = if (intent.getBooleanExtra(EXTRA_HAS_SIGNAL, false)) {
-                            View.VISIBLE
-                        } else {
-                            View.GONE
-                        }
-                        isEnabled = true
-                    }
-                    intent.getStringExtra(EXTRA_RESULT_IMAGE)?.let { imagePath ->
-                        updateOverlayThumbnailText(imagePath, lastCaptureTimestampMs)
-                    }
-                    updateOverlayStatus(getString(R.string.analysis_complete))
+                val direction = intent.getStringExtra(EXTRA_DIRECTION)
+                val confidence = intent.getIntExtra(EXTRA_CONFIDENCE, 0)
+                val movement = intent.getIntExtra(EXTRA_MOVEMENT, 0)
+                val result = when (direction) {
+                    "BUY" -> "🟢 ПОКУПКА\n$confidence%"
+                    "SELL" -> "🔴 ПРОДАЖА\n$confidence%"
+                    else -> "⚪ НЕТ СИГНАЛА"
                 }
-                setOverlayVisible(!intent.getBooleanExtra(EXTRA_KEEP_HIDDEN, false))
+                val resultColor = when (direction) {
+                    "BUY" -> 0xFF2E7D32.toInt()
+                    "SELL" -> 0xFFC62828.toInt()
+                    else -> 0xFF65717E.toInt()
+                }
+                overlayResult?.apply {
+                    text = if (movement > 0 && direction != null && direction != "NONE") {
+                        "$result\nСИЛА ДВИЖЕНИЯ: $movement%"
+                    } else result
+                    setTextColor(Color.WHITE)
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    background = GradientDrawable().apply {
+                        setColor(resultColor)
+                        cornerRadius = dp(12).toFloat()
+                    }
+                }
+                overlayManualConfirmation?.apply {
+                    visibility = View.GONE
+                    isEnabled = false
+                }
+                intent.getStringExtra(EXTRA_RESULT_IMAGE)?.let { imagePath ->
+                    updateOverlayThumbnailText(imagePath, lastCaptureTimestampMs)
+                }
+                overlayStatus?.text = getString(R.string.analysis_complete)
+                setOverlayVisible(true)
                 return START_NOT_STICKY
             }
             ACTION_SHOW_ERROR -> {
@@ -230,7 +250,16 @@ class ScreenCaptureService : Service() {
                 analysisTimeout = null
                 val message = intent.getStringExtra(EXTRA_RESULT_TEXT)
                     ?: getString(R.string.analysis_failed)
-                overlayResult?.text = message
+                overlayResult?.apply {
+                    text = "⚪ НЕТ СИГНАЛА"
+                    setTextColor(Color.WHITE)
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply {
+                        setColor(0xFF65717E.toInt())
+                        cornerRadius = dp(12).toFloat()
+                    }
+                }
                 overlayManualConfirmation?.apply {
                     visibility = View.GONE
                     isEnabled = true
@@ -350,8 +379,8 @@ class ScreenCaptureService : Service() {
                 isEnabled = true
             }
             cycleActive = false
-            setOverlayVisible(false)
             updateOverlayStatus(getString(R.string.capture_getting_frame))
+            setOverlayVisible(true)
             awaitOverlayRemovalFrames(captureGeneration, requiredFrames = OVERLAY_SETTLE_FRAMES)
         } catch (error: IOException) {
             Log.e(TAG, "Unable to prepare capture directory", error)
@@ -515,6 +544,11 @@ class ScreenCaptureService : Service() {
         cycleActive = false
         captureTimeout?.let { handler?.removeCallbacks(it) }
         captureTimeout = null
+        if (!singleFrameCapture) {
+            recordingEnabled = false
+            sendRecordingState()
+            updateOverlayControls()
+        }
         updateOverlayThumbnailText(lastCaptureImagePath, lastCaptureTimestampMs)
         sendCaptureResult(succeeded = true)
         analysisPending = true
@@ -730,34 +764,32 @@ class ScreenCaptureService : Service() {
                 cornerRadius = dp(16).toFloat()
             }
         }
-        val header = TextView(this).apply {
-            text = getString(R.string.overlay_title)
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            setPadding(dp(4), dp(4), dp(4), dp(8))
-            setOnTouchListener(OverlayDragListener())
-        }
-        panel.addView(header)
         overlayStatus = TextView(this).apply {
             text = getString(R.string.capture_session_ready)
             setTextColor(Color.LTGRAY)
             textSize = 11f
-            setPadding(dp(4), 0, dp(4), dp(6))
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(2), dp(4), dp(6))
         }
         panel.addView(overlayStatus)
         overlayResult = TextView(this).apply {
             text = getString(R.string.analysis_not_ready)
             setTextColor(Color.WHITE)
-            textSize = 12f
-            setPadding(dp(4), dp(4), dp(4), dp(8))
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(0xFF65717E.toInt())
+                cornerRadius = dp(12).toFloat()
+            }
         }
         panel.addView(overlayResult)
         overlayThumbnail = ImageView(this).apply {
             visibility = View.GONE
             adjustViewBounds = true
-            maxHeight = dp(124)
+            maxHeight = dp(96)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(220), dp(124))
+            layoutParams = LinearLayout.LayoutParams(dp(220), dp(96))
             setOnClickListener {
                 val path = overlayResult?.contentDescription?.toString()
                 if (!path.isNullOrBlank()) {
@@ -1089,6 +1121,9 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_TEXT = "analysis_result_text"
         const val EXTRA_RESULT_IMAGE = "analysis_result_image"
         const val EXTRA_HAS_SIGNAL = "analysis_has_directional_signal"
+        const val EXTRA_DIRECTION = "analysis_direction"
+        const val EXTRA_CONFIDENCE = "analysis_confidence"
+        const val EXTRA_MOVEMENT = "analysis_movement"
         const val EXTRA_KEEP_HIDDEN = "keep_overlay_hidden"
         const val EXTRA_RECORDING_ENABLED = "recording_enabled"
         const val EXTRA_RESULT_CODE = "result_code"

@@ -126,7 +126,7 @@ jobs:
           test -s "$APK"
           BADGING=$("${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK")
           printf '%s\n' "$BADGING"
-          printf '%s\n' "$BADGING" | grep -q "^package: name='com.autoscanner.trader' versionCode='8' versionName='0.2.6'"
+          printf '%s\n' "$BADGING" | grep -q "^package: name='com.autoscanner.trader' versionCode='9' versionName='0.2.7'"
           if "${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK" | grep -q '^application-debuggable'; then
             echo "Release APK must not be debuggable"
             exit 1
@@ -168,6 +168,6 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "$APK" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "AutoScanner Trader 0.2.6" \
-              --notes "Signed release APK. Package: com.autoscanner.trader; versionCode: 8; versionName: 0.2.6. The build verifies the pinned release certificate fingerprint."
+              --title "AutoScanner Trader 0.2.7" \
+              --notes "Signed release APK. Package: com.autoscanner.trader; versionCode: 9; versionName: 0.2.7. The build verifies the pinned release certificate fingerprint."
           fi

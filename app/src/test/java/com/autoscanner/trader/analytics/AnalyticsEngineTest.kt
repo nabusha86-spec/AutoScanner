@@ -155,6 +155,20 @@ class AnalyticsEngineTest {
     }
 
     @Test
+    fun recentThreeToFiveCandlesReceiveReversalWeight() {
+        val recentUpThenDown = (1..8).map { index ->
+            val close = if (index <= 5) 100.0 + index else 100.0 + (8 - index)
+            candle(index, close, if (index <= 5) CandleDirection.UP else CandleDirection.DOWN)
+        }
+        val result = TrendAnalysisEngine().analyze(recentUpThenDown)
+        assertTrue(
+            result.direction == TrendDirection.POSSIBLE_REVERSAL ||
+                result.direction == TrendDirection.SIDEWAYS ||
+                result.direction == TrendDirection.DOWN,
+        )
+    }
+
+    @Test
     fun shortChartWithDirectionalCandlesDoesNotForceLowConfidenceSignal() {
         val candles = (0 until 6).map { index ->
             val top = 40 - index * 2
